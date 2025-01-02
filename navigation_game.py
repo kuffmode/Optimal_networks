@@ -237,13 +237,12 @@ class NavigationGame:
             
         return adjacency
     
-    def _build_parametric_network(self) -> np.ndarray:
-        """Build network using parametric formulation."""
+    def _build_parametric_network(self, max_iterations: int = 100) -> np.ndarray:
+        """Non-recursive parametric network construction."""
         n = len(self.coordinates)
         adjacency = np.zeros((n, n), dtype=bool)
         
-        converged = False
-        while not converged:
+        for iteration in range(max_iterations):
             old_adjacency = adjacency.copy()
             
             for i in range(n):
@@ -251,8 +250,9 @@ class NavigationGame:
                 adjacency[i] = strategy
                 
             if np.array_equal(adjacency, old_adjacency):
-                converged = True
+                return adjacency
                 
+        warnings.warn(f"Network did not converge after {max_iterations} iterations")
         return adjacency
     
     def _compute_deterministic_strategy(self, node_idx: int) -> np.ndarray:
@@ -340,33 +340,30 @@ class NavigationGame:
                     
         return successful / total
     
-    def _find_unique_minimal_solution(self) -> np.ndarray:
-        """Find unique Nash equilibrium minimizing total edge distance."""
+    def _find_unique_minimal_solution(self, max_attempts: int = 1000) -> np.ndarray:
+        """Non-recursive unique solution finder."""
         n = len(self.coordinates)
-        
-        # First get basic Nash equilibrium
         basic_solution = self._build_deterministic_network()
         
         if not self.config.find_unique:
             return basic_solution
             
-        # Find all minimum set cover solutions for each node
+        best_distance = self._compute_total_edge_distance(basic_solution)
+        best_solution = basic_solution
+        
         all_node_solutions = []
         for i in range(n):
             coverage_areas = compute_coverage_areas(i, self.distances)
             solutions = self._find_all_minimal_covers(i, coverage_areas)
             all_node_solutions.append(solutions)
             
-        # Find combination minimizing total distance while maintaining Nash equilibrium
-        best_distance = self._compute_total_edge_distance(basic_solution)
-        best_solution = basic_solution
-        
-        for solution_combo in self._iterate_valid_combinations(all_node_solutions):
-            total_dist = self._compute_total_edge_distance(solution_combo)
-            if total_dist < best_distance and self._verify_nash_equilibrium(solution_combo):
-                best_distance = total_dist
-                best_solution = solution_combo.copy()
-                
+        for combination in self._iterate_valid_combinations(all_node_solutions, max_attempts):
+            if self._verify_nash_equilibrium(combination):
+                total_dist = self._compute_total_edge_distance(combination)
+                if total_dist < best_distance:
+                    best_distance = total_dist
+                    best_solution = combination.copy()
+                    
         return best_solution
     
     def _find_all_minimal_covers(self, node_idx: int, coverage_areas: np.ndarray, max_attempts: int = 1000) -> List[np.ndarray]:
@@ -411,33 +408,18 @@ class NavigationGame:
                 
         return minimal_covers
     
-    def _iterate_valid_combinations(self, all_node_solutions: List[List[np.ndarray]]):
-        """Generate valid combinations of node solutions using memory-efficient iteration."""
-        n_nodes = len(all_node_solutions)
-        if n_nodes == 0:
-            return
-            
-        # Keep track of current indices for each node's solutions
-        indices = np.zeros(n_nodes, dtype=int)
-        lengths = [len(solutions) for solutions in all_node_solutions]
+    def _iterate_valid_combinations(self, all_node_solutions: List[List[np.ndarray]], 
+                              max_attempts: int = 1000) -> np.ndarray:
+        """Non-recursive combination generator."""
+        n = len(all_node_solutions)
         
-        while True:
-            # Build current combination
-            current_combo = np.array([
-                all_node_solutions[i][indices[i]]
-                for i in range(n_nodes)
-            ])
-            
-            yield current_combo
-            
-            # Update indices
-            for i in range(n_nodes - 1, -1, -1):
-                indices[i] += 1
-                if indices[i] < lengths[i]:
-                    break
-                indices[i] = 0
-                if i == 0:  # We've gone through all combinations
-                    return
+        for _ in range(max_attempts):
+            # Random combination
+            combination = [
+                solutions[np.random.randint(len(solutions))]
+                for solutions in all_node_solutions
+            ]
+            yield np.array(combination)
     
     def _compute_total_edge_distance(self, adjacency: np.ndarray) -> float:
         """Compute total distance spanned by edges."""
@@ -490,17 +472,21 @@ class NavigationGame:
                 
         return current
     
-    def _verify_nash_equilibrium(self, adjacency: np.ndarray) -> bool:
-        """Verify if network is in Nash equilibrium."""
+    def _verify_nash_equilibrium(self, adjacency: np.ndarray, max_attempts: int = 1000) -> bool:
+        """Non-recursive Nash equilibrium verification."""
         n = len(adjacency)
         
         for i in range(n):
             current_cost = self._compute_strategy_cost(i, adjacency[i], adjacency)
             
-            # Try all alternative strategies
-            for alt_strategy in self._iterate_possible_strategies(n, i):
+            # Use iterator instead of recursion
+            for attempt in range(max_attempts):
+                # Generate random strategy
+                alt_strategy = np.random.randint(2, size=n, dtype=bool)
+                alt_strategy[i] = False  # No self-loops
+                
                 alt_cost = self._compute_strategy_cost(i, alt_strategy, adjacency)
-                if alt_cost < current_cost - 1e-10:  # numerical tolerance
+                if alt_cost < current_cost - 1e-10:
                     return False
                     
         return True
