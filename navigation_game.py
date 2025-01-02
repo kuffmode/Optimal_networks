@@ -1,505 +1,204 @@
 """
-Implementation of Network Navigation Game (NNG) based on Gulyás et al. 2015.
-Includes both deterministic and parametric versions with options for symmetry and unique solutions.
+Optimally Navigable Networks
+
+This module is a rough* implementation of the work done by [1]. Given some coordinates in the Euclidean space,
+it provides the "backbone" network that is minimally wired while being 100% navigable, thus, being a Nash equilibrium of
+the navigation game. 
+
+The network is represented as:
+- Nodes with coordinates in n-dimensional space
+- Edges between nodes that enable navigation
+- Distance metrics based on Euclidean distance
+- Nash equilibrium properties for optimal connectivity
+
+Classes:
+    NavigableNetwork: Main class implementing the navigable network functionality
+
+
+[1] Gulyás, A., Bíró, J. J., Kőrösi, A., Rétvári, G., & Krioukov, D. (2015). Navigable networks as Nash equilibria of navigation games. Nat. Commun., 6(1), 7651. https://doi.org/10.1038/ncomms8651
+* I'm calling it rough implementation because I read the paper, used Claude Sonnet, and implemented the relevant parts for brain networks.
+* The paper itself has a lot more to offer.
 """
 
-from dataclasses import dataclass
-from enum import Enum
-from typing import Optional, Tuple, List
+from typing import Set
 import numpy as np
-import numba as nb
-from joblib import Parallel, delayed
-import warnings
-import psutil
+from scipy.spatial.distance import pdist, squareform
 
-class GameType(Enum):
-    DETERMINISTIC = "deterministic"  # Original formulation (β = ∞)
-    PARAMETRIC = "parametric"        # Modified version with finite α, β
 
-@dataclass
-class NNGConfig:
-    """Configuration for Network Navigation Game."""
-    # Core settings
-    find_unique: bool = True
-    enforce_symmetry: bool = False
-    n_jobs: int = -1
-    chunk_size: int = 1000
-    seed: Optional[int] = None
-    verbose: bool = True
+class NavigableNetwork:
+    """
+    A class representing a navigable network with Nash equilibrium properties.
+
+    This class implements a network where nodes are positioned in coordinate space
+    and can establish connections to enable efficient navigation between any pair
+    of nodes using greedy routing.
+
+    Attributes:
+        coordinates (np.ndarray): Array of node coordinates in n-dimensional space.
+            Shape: (n_nodes, n_dimensions)
+        n_nodes (int): Number of nodes in the network
+        distances (np.ndarray): Matrix of pairwise distances between all nodes.
+            Shape: (n_nodes, n_nodes)
+    """
+
+    def __init__(self, coordinates: np.ndarray):
+        """
+        Initialize the NavigableNetwork with node coordinates.
+
+        Args:
+            coordinates (np.ndarray): Array of node coordinates in n-dimensional space.
+                Shape: (n_nodes, n_dimensions)
+        """
+        if len(coordinates) == 0:
+            raise ValueError("Coordinates array cannot be empty, who are you fooling?")
+        if coordinates.ndim != 2:
+            raise ValueError("Coordinates must be a 2D array with shape (n_nodes, dimension)")
     
-    # Parametric game settings
-    game_type: GameType = GameType.DETERMINISTIC
-    alpha: float = 1.0  # Weight for wiring cost
-    beta: float = 1.0   # Weight for navigation penalty
+        self.coordinates = coordinates
+        self.n_nodes = len(coordinates)
+        # Calculate pairwise distances between all nodes
+        self.distances = self._compute_distances()
     
-    def validate_config(self):
-        """Validate configuration settings and their interactions."""
-        # Deterministic case should ignore α and β
-        if self.game_type == GameType.DETERMINISTIC:
-            if self.alpha != 1.0 or self.beta != 1.0:
-                warnings.warn(
-                    "Alpha and beta parameters are ignored in deterministic mode.",
-                    RuntimeWarning
+    def _compute_distances(self) -> np.ndarray:
+        """
+        Compute pairwise Euclidean distances between all nodes in the network.
+
+        Returns:
+            np.ndarray: Matrix of pairwise distances with shape (n_nodes, n_nodes)
+                where distances[i,j] represents the Euclidean distance between
+                nodes i and j.
+        """
+
+        return squareform(pdist(self.coordinates, metric='euclidean'))
+
+    def _get_minimal_covers(self, source_node: int) -> Set[int]:
+        """
+        Get minimal set of nodes needed by the source node to enable navigation to all targets.
+
+        For each target node, we need at least one neighbor node where:
+        distance(neighbor, target) <= distance(source, target)
+
+        Args:
+            source_node (int): Index of the source node
+
+        Returns:
+            Set[int]: Set of node indices that form the minimal cover set
+        """
+        required_neighbors: Set[int] = set()
+        
+        # Examine each potential target node
+        for target_node in range(self.n_nodes):
+            # Skip if target is the source node itself
+            if target_node == source_node:
+                continue
+                
+            # Find all nodes that can serve as intermediate points to reach the target
+            potential_covers = [
+                neighbor_node for neighbor_node in range(self.n_nodes) 
+                if (neighbor_node != source_node and  # not the source node itself
+                    # can provide shorter or equal path to target
+                    self.distances[neighbor_node, target_node] <= self.distances[source_node, target_node])
+            ]
+            
+            # Skip if no nodes can provide better coverage
+            if not potential_covers:
+                continue
+                
+            # Select the node closest to the target as the optimal cover
+            best_cover = min(
+                potential_covers,
+                key=lambda node: self.distances[node, target_node]
+            )
+            required_neighbors.add(best_cover)
+            
+        return required_neighbors
+
+    def build_nash_equilibrium(self) -> np.ndarray:
+        """
+        Build the Nash equilibrium network configuration.
+
+        Constructs an adjacency matrix representing the network configuration
+        where no node can improve its routing capability by changing its
+        connections unilaterally.
+
+        Returns:
+            np.ndarray: Boolean adjacency matrix with shape (n_nodes, n_nodes)
+                where adjacency[i,j] = True indicates an edge from node i to node j
+        """
+        # Initialize adjacency matrix
+        adjacency = np.zeros((self.n_nodes, self.n_nodes), dtype=bool)
+        
+        # For each node, establish connections to its required neighbors
+        for current_node in range(self.n_nodes):
+            optimal_neighbors = self._get_minimal_covers(current_node)
+            for neighbor in optimal_neighbors:
+                adjacency[current_node, neighbor] = True
+                
+        return adjacency
+
+    def verify_navigability(self, adjacency: np.ndarray) -> bool:
+        """
+        Verify that the network enables successful greedy routing between all node pairs.
+
+        Args:
+            adjacency (np.ndarray): Boolean adjacency matrix with shape (n_nodes, n_nodes)
+                where adjacency[i,j] = True indicates an edge from node i to node j
+
+        Returns:
+            bool: True if greedy routing succeeds between all node pairs, False otherwise
+        """
+        def can_route(start: int, target: int) -> bool:
+            """
+            Check if greedy routing can reach from start to target node.
+
+            Args:
+                start (int): Starting node index
+                target (int): Target node index
+
+            Returns:
+                bool: True if route exists, False otherwise
+            """
+            if start == target:
+                return True
+            
+            current_node = start
+            visited_nodes = {current_node}
+            
+            while True:
+                # Find unvisited neighbors of current node
+                unvisited_neighbors = [
+                    node for node in range(self.n_nodes)
+                    if adjacency[current_node, node] and node not in visited_nodes
+                ]
+                
+                # If no unvisited neighbors, routing fails
+                if not unvisited_neighbors:
+                    return False
+                
+                # Select neighbor closest to target
+                next_node = min(
+                    unvisited_neighbors,
+                    key=lambda node: self.distances[node, target]
                 )
                 
-        # Warn about uniqueness in parametric case
-        if self.game_type == GameType.PARAMETRIC and self.find_unique:
-            warnings.warn(
-                "Unique solution is not guaranteed in parametric mode. "
-                "Setting find_unique=True may not yield expected results.",
-                RuntimeWarning
-            )
-        
-        if self.alpha <= 0 or self.beta <= 0:
-            raise ValueError("Alpha and beta must be positive")
-
-@nb.njit(fastmath=True)
-def compute_distances(coordinates: np.ndarray) -> np.ndarray:
-    """Compute pairwise Euclidean distances between points."""
-    n = len(coordinates)
-    distances = np.zeros((n, n))
-    
-    for i in nb.prange(n):
-        for j in range(i + 1, n):
-            dist = np.sqrt(np.sum((coordinates[i] - coordinates[j]) ** 2))
-            distances[i, j] = distances[j, i] = dist
-    
-    return distances
-
-@nb.njit(parallel=True, fastmath=True)
-def compute_coverage_areas(node_idx: int, distances: np.ndarray) -> np.ndarray:
-    """Compute coverage areas for all potential neighbors of a node."""
-    n = len(distances)
-    coverage = np.zeros((n, n), dtype=nb.boolean)
-    eps = 1e-10  # Numerical tolerance
-    
-    for i in nb.prange(n):
-        if i != node_idx:
-            for j in range(n):
-                if j != node_idx and j != i:
-                    coverage[i, j] = distances[j, i] < distances[j, node_idx] - eps
-            coverage[i, i] = True
-    
-    return coverage
-
-@nb.njit
-def solve_min_set_cover(universe: np.ndarray, coverage_sets: np.ndarray) -> np.ndarray:
-    """Solve minimum set cover using greedy algorithm."""
-    n_sets = len(coverage_sets)
-    remaining = universe.copy()
-    selected = np.zeros(n_sets, dtype=nb.boolean)
-    
-    while np.any(remaining):
-        best_coverage = 0
-        best_set = -1
-        
-        for i in range(n_sets):
-            if not selected[i]:
-                coverage = np.sum(coverage_sets[i] & remaining)
-                if coverage > best_coverage:
-                    best_coverage = coverage
-                    best_set = i
-        
-        if best_set == -1 or best_coverage == 0:
-            break
-            
-        selected[best_set] = True
-        remaining &= ~coverage_sets[best_set]
-    
-    return np.where(selected)[0]
-
-def check_navigability(
-    adjacency: np.ndarray,
-    distances: np.ndarray,
-    source: int,
-    target: int,
-    max_steps: Optional[int] = None
-) -> bool:
-    """Check if greedy routing can navigate from source to target."""
-    if max_steps is None:
-        max_steps = len(adjacency)
-        
-    current = source
-    visited = {source}
-    steps = 0
-    current_dist = distances[source, target]
-    
-    while current != target and steps < max_steps:
-        # Get all neighbors
-        neighbors = set(np.where(adjacency[current])[0])
-        if not neighbors:
-            return False
-            
-        # Find neighbor closest to target
-        best_dist = float('inf')
-        best_neighbor = None
-        
-        for neighbor in neighbors:
-            dist = distances[neighbor, target]
-            if dist < best_dist and dist < current_dist:
-                best_dist = dist
-                best_neighbor = neighbor
+                # Check if we've reached the target
+                if next_node == target:
+                    return True
                 
-        if best_neighbor is None:
-            return False
-            
-        if best_neighbor in visited:
-            return False
-            
-        current = best_neighbor
-        current_dist = distances[current, target]
-        visited.add(current)
-        steps += 1
-    
-    return current == target
-
-class NavigationGame:
-    """Enhanced Network Navigation Game implementation."""
-    
-    def __init__(self, config: NNGConfig):
-        self.config = config
-        self.adjacency = None
-        self.distances = None
-        self.coordinates = None
-        
-    def validate_state(self):
-        """Comprehensive validation of game state and settings."""
-        if self.coordinates is None or self.distances is None:
-            raise ValueError("Coordinates and distances must be set before building network")
-            
-        n = len(self.coordinates)
-        
-        if self.config.game_type == GameType.PARAMETRIC and self.config.beta > 1e6:
-            warnings.warn(
-                "Very large beta values may cause numerical instability. "
-                "Consider using deterministic mode instead.",
-                RuntimeWarning
-            )
-            
-        if n > 100 and self.config.find_unique:
-            warnings.warn(
-                "Finding unique solution for large networks may be computationally expensive",
-                RuntimeWarning
-            )
-            
-        estimated_memory = self._estimate_memory_requirement()
-        available_memory = psutil.virtual_memory().available
-        if estimated_memory > 0.8 * available_memory:
-            warnings.warn(
-                "Operation may exceed available memory",
-                ResourceWarning
-            )
-    
-    def _estimate_memory_requirement(self) -> int:
-        """Estimate memory requirement for computation."""
-        n = len(self.coordinates)
-        # Basic matrices (adjacency, distances, coverage)
-        basic_memory = 3 * n * n * 8  # 8 bytes per float64
-        
-        # Additional memory for unique solution search
-        if self.config.find_unique:
-            # Rough estimate for storing multiple solutions
-            basic_memory *= 10
-            
-        return basic_memory
-        
-    def build_network(self, coordinates: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """Build Nash equilibrium network."""
-        self.coordinates = coordinates
-        self.distances = compute_distances(coordinates)
-        
-        # Validate configuration and state
-        self.config.validate_config()
-        self.validate_state()
-        
-        if self.config.game_type == GameType.DETERMINISTIC:
-            self.adjacency = self._build_deterministic_network()
-        else:
-            self.adjacency = self._build_parametric_network()
-            
-        if self.config.enforce_symmetry:
-            self.adjacency = self._symmetrize_solution(self.adjacency)
-            
-        return self.adjacency, self.distances
-    
-    def _build_deterministic_network(self) -> np.ndarray:
-        """Build network using original deterministic formulation."""
-        n = len(self.coordinates)
-        
-        if self.config.find_unique:
-            return self._find_unique_minimal_solution()
-        
-        # Basic Nash equilibrium using minimum set cover
-        adjacency = np.zeros((n, n), dtype=bool)
-        for i in range(n):
-            strategy = self._compute_deterministic_strategy(i)
-            adjacency[i] = strategy
-            
-        return adjacency
-    
-    def _build_parametric_network(self, max_iterations: int = 100) -> np.ndarray:
-        """Non-recursive parametric network construction."""
-        n = len(self.coordinates)
-        adjacency = np.zeros((n, n), dtype=bool)
-        
-        for iteration in range(max_iterations):
-            old_adjacency = adjacency.copy()
-            
-            for i in range(n):
-                strategy = self._compute_parametric_strategy(i, adjacency)
-                adjacency[i] = strategy
+                # Check if we're getting closer to target
+                if self.distances[next_node, target] >= self.distances[current_node, target]:
+                    return False  # Routing fails if not getting closer
                 
-            if np.array_equal(adjacency, old_adjacency):
-                return adjacency
+                current_node = next_node
+                visited_nodes.add(current_node)
                 
-        warnings.warn(f"Network did not converge after {max_iterations} iterations")
-        return adjacency
-    
-    def _compute_deterministic_strategy(self, node_idx: int) -> np.ndarray:
-        """Compute strategy for deterministic case using minimum set cover."""
-        n = len(self.distances)
-        universe = np.ones(n, dtype=bool)
-        universe[node_idx] = False
-        
-        coverage_areas = compute_coverage_areas(node_idx, self.distances)
-        selected_nodes = solve_min_set_cover(universe, coverage_areas)
-        
-        connections = np.zeros(n, dtype=bool)
-        connections[selected_nodes] = True
-        
-        # Add frame edges
-        for j in range(n):
-            if j != node_idx:
-                is_closest = True
-                for k in range(n):
-                    if k != j and k != node_idx:
-                        if self.distances[j, k] < self.distances[j, node_idx]:
-                            is_closest = False
-                            break
-                if is_closest:
-                    connections[j] = True
-        
-        return connections
-    
-    def _compute_parametric_strategy(self, node_idx: int, current_adjacency: np.ndarray) -> np.ndarray:
-        """Compute strategy for parametric case optimizing cost-navigation trade-off."""
-        n = len(self.distances)
-        best_cost = float('inf')
-        best_strategy = None
-        
-        # For small networks, try all strategies
-        # For larger networks, would need more sophisticated optimization
-        for strategy in self._iterate_possible_strategies(n, node_idx):
-            wiring_cost = self.config.alpha * np.sum(
-                strategy * self.distances[node_idx]
-            )
-            nav_success = self._compute_navigation_success(
-                node_idx, strategy, current_adjacency
-            )
-            nav_cost = self.config.beta * (1 - nav_success)
-            
-            total_cost = wiring_cost + nav_cost
-            
-            if total_cost < best_cost:
-                best_cost = total_cost
-                best_strategy = strategy.copy()
-                
-        return best_strategy
-    
-    def _iterate_possible_strategies(self, n: int, node_idx: int):
-        """Generate possible strategies for a node."""
-        # For small networks, generate all possibilities
-        # This should be replaced with more sophisticated search for larger networks
-        strategy = np.zeros(n, dtype=bool)
-        for i in range(2**(n-1)):
-            idx = 0
-            for j in range(n):
-                if j != node_idx:
-                    strategy[j] = bool(i & (1 << idx))
-                    idx += 1
-            yield strategy.copy()
-    
-    def _compute_navigation_success(
-        self, 
-        node_idx: int, 
-        strategy: np.ndarray,
-        current_adjacency: np.ndarray
-    ) -> float:
-        """Compute fraction of successful navigations from node to all others."""
-        n = len(self.distances)
-        successful = 0
-        total = n - 1  # Exclude self
-        
-        temp_adj = current_adjacency.copy()
-        temp_adj[node_idx] = strategy
-        
-        for target in range(n):
-            if target != node_idx:
-                if check_navigability(temp_adj, self.distances, node_idx, target):
-                    successful += 1
-                    
-        return successful / total
-    
-    def _find_unique_minimal_solution(self, max_attempts: int = 1000) -> np.ndarray:
-        """Non-recursive unique solution finder."""
-        n = len(self.coordinates)
-        basic_solution = self._build_deterministic_network()
-        
-        if not self.config.find_unique:
-            return basic_solution
-            
-        best_distance = self._compute_total_edge_distance(basic_solution)
-        best_solution = basic_solution
-        
-        all_node_solutions = []
-        for i in range(n):
-            coverage_areas = compute_coverage_areas(i, self.distances)
-            solutions = self._find_all_minimal_covers(i, coverage_areas)
-            all_node_solutions.append(solutions)
-            
-        for combination in self._iterate_valid_combinations(all_node_solutions, max_attempts):
-            if self._verify_nash_equilibrium(combination):
-                total_dist = self._compute_total_edge_distance(combination)
-                if total_dist < best_distance:
-                    best_distance = total_dist
-                    best_solution = combination.copy()
-                    
-        return best_solution
-    
-    def _find_all_minimal_covers(self, node_idx: int, coverage_areas: np.ndarray, max_attempts: int = 1000) -> List[np.ndarray]:
-        """Find all minimal set covers for a node using iteration instead of recursion."""
-        n = len(self.distances)
-        universe = np.ones(n, dtype=bool)
-        universe[node_idx] = False
-        
-        # Get size bound from greedy solution
-        greedy_cover = solve_min_set_cover(universe, coverage_areas)
-        min_size = np.sum(greedy_cover)
-        minimal_covers = [greedy_cover]
-        
-        def is_valid_cover(cover: np.ndarray) -> bool:
-            reached = np.zeros(n, dtype=bool)
-            for i, included in enumerate(cover):
-                if included:
-                    reached |= coverage_areas[i]
-            return np.all(reached[universe])
-        
-        # Iterative approach using systematic enumeration
-        attempts = 0
-        for attempt in range(max_attempts):
-            cover = np.zeros(n, dtype=bool)
-            selected = 0
-            
-            # Randomly select nodes until we have min_size selections
-            idxs = np.random.permutation(n)
-            for idx in idxs:
-                if selected >= min_size:
-                    break
-                if idx != node_idx:
-                    cover[idx] = True
-                    selected += 1
-                    
-            if is_valid_cover(cover) and not any(np.array_equal(cover, existing) for existing in minimal_covers):
-                minimal_covers.append(cover)
-                
-            attempts += 1
-            if attempts >= max_attempts:
-                break
-                
-        return minimal_covers
-    
-    def _iterate_valid_combinations(self, all_node_solutions: List[List[np.ndarray]], 
-                              max_attempts: int = 1000) -> np.ndarray:
-        """Non-recursive combination generator."""
-        n = len(all_node_solutions)
-        
-        for _ in range(max_attempts):
-            # Random combination
-            combination = [
-                solutions[np.random.randint(len(solutions))]
-                for solutions in all_node_solutions
-            ]
-            yield np.array(combination)
-    
-    def _compute_total_edge_distance(self, adjacency: np.ndarray) -> float:
-        """Compute total distance spanned by edges."""
-        return np.sum(adjacency * self.distances)
-    
-    def _symmetrize_solution(self, adjacency: np.ndarray) -> np.ndarray:
-        """Create symmetric version of solution while preserving navigability."""
-        n = len(adjacency)
-        
-        # Initial symmetrization
-        symmetric = np.logical_or(adjacency, adjacency.T)
-        
-        if self._verify_nash_equilibrium(symmetric):
-            return self._minimize_symmetric_solution(symmetric)
-        
-        # If basic symmetrization breaks Nash equilibrium,
-        # add minimal symmetric pairs until we achieve it
-        current = adjacency.copy()
-        
-        for i in range(n):
-            for j in range(i+1, n):
-                if adjacency[i,j] != adjacency[j,i]:
-                    current[i,j] = current[j,i] = True
-                    if not self._verify_nash_equilibrium(current):
-                        current[i,j] = adjacency[i,j]
-                        current[j,i] = adjacency[j,i]
-                        
-        return current
-    
-    def _minimize_symmetric_solution(self, symmetric: np.ndarray) -> np.ndarray:
-        """Try to remove symmetric pairs while maintaining Nash equilibrium."""
-        n = len(symmetric)
-        current = symmetric.copy()
-        
-        # Try removing symmetric pairs in order of total distance
-        edges = []
-        for i in range(n):
-            for j in range(i+1, n):
-                if symmetric[i,j]:
-                    dist = self.distances[i,j] + self.distances[j,i]
-                    edges.append((dist, i, j))
-                    
-        # Sort by distance descending - try to remove longest edges first
-        edges.sort(reverse=True)
-        
-        for _, i, j in edges:
-            current[i,j] = current[j,i] = False
-            if not self._verify_nash_equilibrium(current):
-                current[i,j] = current[j,i] = True
-                
-        return current
-    
-    def _verify_nash_equilibrium(self, adjacency: np.ndarray, max_attempts: int = 1000) -> bool:
-        """Non-recursive Nash equilibrium verification."""
-        n = len(adjacency)
-        
-        for i in range(n):
-            current_cost = self._compute_strategy_cost(i, adjacency[i], adjacency)
-            
-            # Use iterator instead of recursion
-            for attempt in range(max_attempts):
-                # Generate random strategy
-                alt_strategy = np.random.randint(2, size=n, dtype=bool)
-                alt_strategy[i] = False  # No self-loops
-                
-                alt_cost = self._compute_strategy_cost(i, alt_strategy, adjacency)
-                if alt_cost < current_cost - 1e-10:
+                # Prevent infinite loops
+                if len(visited_nodes) == self.n_nodes:
                     return False
-                    
+        
+        # Verify routing between all node pairs
+        for source in range(self.n_nodes):
+            for destination in range(self.n_nodes):
+                if source != destination and not can_route(source, destination):
+                    return False
         return True
-    
-    def _compute_strategy_cost(self, node_idx: int, strategy: np.ndarray, adjacency: np.ndarray) -> float:
-        """Compute cost of a strategy for a node."""
-        if self.config.game_type == GameType.DETERMINISTIC:
-            # In deterministic case, cost is number of edges if fully navigable, infinity otherwise
-            nav_success = self._compute_navigation_success(node_idx, strategy, adjacency)
-            return np.sum(strategy) if nav_success == 1.0 else float('inf')
-        else:
-            # In parametric case, weighted sum of wiring cost and navigation penalty
-            wiring_cost = self.config.alpha * np.sum(strategy * self.distances[node_idx])
-            nav_success = self._compute_navigation_success(node_idx, strategy, adjacency)
-            nav_cost = self.config.beta * (1 - nav_success)
-            return wiring_cost + nav_cost

@@ -1,193 +1,169 @@
-"""
-Unit tests for the Network Navigation Game implementation.
-"""
-
 import numpy as np
 import pytest
-import warnings
-from navigation_game import NavigationGame, NNGConfig, GameType
+from navigation_game import NavigableNetwork
 
-def create_sample_coordinates(n_nodes: int = 5, seed: int = 42) -> np.ndarray:
-    """Create sample coordinates for testing."""
-    np.random.seed(seed)
-    return np.random.rand(n_nodes, 2)
+def test_two_nodes():
+    """Test the simplest possible case - two nodes."""
+    coords = np.array([
+        [0, 0],  # Node 0
+        [1, 0],  # Node 1
+    ])
+    
+    network = NavigableNetwork(coords)
+    nash = network.build_nash_equilibrium()
+    
+    # Should get bidirectional connection
+    expected = np.array([
+        [0, 1],
+        [1, 0]
+    ], dtype=bool)
+    np.testing.assert_array_equal(nash, expected)
+    assert network.verify_navigability(nash)
 
-def test_parameter_independence():
-    """Test that deterministic mode ignores alpha and beta parameters."""
-    coords = create_sample_coordinates()
+def test_triangle():
+    """Test with isosceles triangle configuration."""
+    coords = np.array([
+        [0, 2],    # A (node 0)
+        [-1, 0],   # B (node 1)
+        [1, 0],    # C (node 2)
+    ])
     
-    # Reference solution with default parameters
-    config = NNGConfig(game_type=GameType.DETERMINISTIC)
-    game = NavigationGame(config)
-    ref_adj, _ = game.build_network(coords)
+    network = NavigableNetwork(coords)
+    nash = network.build_nash_equilibrium()
     
-    # Solution with different alpha/beta should be identical
-    config = NNGConfig(
-        game_type=GameType.DETERMINISTIC,
-        alpha=100.0,
-        beta=1000.0
-    )
-    game = NavigationGame(config)
-    
-    with pytest.warns(RuntimeWarning, match="Alpha and beta parameters are ignored"):
-        test_adj, _ = game.build_network(coords)
-        
-    np.testing.assert_array_equal(ref_adj, test_adj)
+    # Basic properties
+    assert nash.shape == (3, 3)
+    assert not nash.diagonal().any()  # No self-loops
+    assert network.verify_navigability(nash)
 
-def test_parametric_convergence():
-    """Test that parametric solution converges to deterministic with large beta."""
-    coords = create_sample_coordinates()
+def test_square():
+    """Test square configuration."""
+    coords = np.array([
+        [0, 1],  # Top left
+        [1, 1],  # Top right
+        [0, 0],  # Bottom left
+        [1, 0],  # Bottom right
+    ])
     
-    # Get deterministic solution
-    det_config = NNGConfig(game_type=GameType.DETERMINISTIC)
-    det_game = NavigationGame(det_config)
-    det_adj, _ = det_game.build_network(coords)
+    network = NavigableNetwork(coords)
+    nash = network.build_nash_equilibrium()
     
-    # Test convergence with increasing beta
-    betas = [1, 10, 100, 1000]
-    diffs = []
+    assert nash.shape == (4, 4)
+    assert not nash.diagonal().any()
+    assert network.verify_navigability(nash)
     
-    for beta in betas:
-        param_config = NNGConfig(
-            game_type=GameType.PARAMETRIC,
-            alpha=1.0,
-            beta=beta
-        )
-        param_game = NavigationGame(param_config)
-        param_adj, _ = param_game.build_network(coords)
-        
-        diff = np.sum(np.abs(det_adj - param_adj))
-        diffs.append(diff)
-    
-    # Differences should decrease with increasing beta
-    assert all(d1 >= d2 for d1, d2 in zip(diffs[:-1], diffs[1:]))
-    
-def test_symmetry_consistency():
-    """Test that symmetry is maintained across game types."""
-    coords = create_sample_coordinates()
-    
-    for game_type in GameType:
-        config = NNGConfig(
-            game_type=game_type,
-            enforce_symmetry=True
-        )
-        game = NavigationGame(config)
-        adj, _ = game.build_network(coords)
-        
-        # Check symmetry
-        assert np.allclose(adj, adj.T), f"Symmetry violated in {game_type.value} mode"
-        
-        # Check it's still a valid solution
-        assert game._verify_nash_equilibrium(adj), \
-            f"Symmetric solution is not Nash equilibrium in {game_type.value} mode"
+    # Check symmetry properties
+    assert np.array_equal(nash[0,1], nash[1,0])  # Top edge symmetric
+    assert np.array_equal(nash[2,3], nash[3,2])  # Bottom edge symmetric
+    assert np.array_equal(nash[0,2], nash[2,0])  # Left edge symmetric
+    assert np.array_equal(nash[1,3], nash[3,1])  # Right edge symmetric
 
-def test_uniqueness_warning():
-    """Test warning about uniqueness in parametric mode."""
-    coords = create_sample_coordinates()
+def test_star_configuration():
+    """Test 5-node star configuration with central hub."""
+    # Create a star with one central node and 4 nodes around it
+    r = 1.0  # radius
+    angles = np.linspace(0, 2*np.pi, 5, endpoint=False)
+    coords = np.zeros((5, 2))
+    # Center node at origin
+    coords[0] = [0, 0]
+    # Surrounding nodes
+    for i in range(4):
+        coords[i+1] = [r * np.cos(angles[i]), r * np.sin(angles[i])]
     
-    config = NNGConfig(
-        game_type=GameType.PARAMETRIC,
-        find_unique=True
-    )
-    game = NavigationGame(config)
+    network = NavigableNetwork(coords)
+    nash = network.build_nash_equilibrium()
     
-    with pytest.warns(RuntimeWarning, match="Unique solution is not guaranteed"):
-        game.build_network(coords)
+    assert nash.shape == (5, 5)
+    assert not nash.diagonal().any()
+    assert network.verify_navigability(nash)
+    
+    # Center node (0) should connect to all others
+    assert np.all(nash[0, 1:])
+    # All peripheral nodes should connect to center
+    assert np.all(nash[1:, 0])
 
-def test_full_navigation_deterministic():
-    """Test that deterministic solution achieves full navigation."""
-    coords = create_sample_coordinates()
+def test_line():
+    """Test nodes arranged in a straight line."""
+    coords = np.array([
+        [0, 0],
+        [1, 0],
+        [2, 0],
+        [3, 0],
+        [4, 0],
+    ])
     
-    config = NNGConfig(game_type=GameType.DETERMINISTIC)
-    game = NavigationGame(config)
-    adj, distances = game.build_network(coords)
+    network = NavigableNetwork(coords)
+    nash = network.build_nash_equilibrium()
     
-    n = len(coords)
-    for i in range(n):
-        for j in range(n):
-            if i != j:
-                assert game._compute_navigation_success(i, adj[i], adj) == 1.0
+    assert nash.shape == (5, 5)
+    assert not nash.diagonal().any()
+    assert network.verify_navigability(nash)
+    
+    # Each node should at least connect to its immediate neighbors
+    for i in range(4):
+        assert nash[i, i+1] or nash[i+1, i]
 
-def test_memory_warning():
-    """Test memory requirement warning for large networks."""
-    coords = create_sample_coordinates(n_nodes=1000)
+def test_pentagon():
+    """Test regular pentagon configuration."""
+    # Create regular pentagon vertices
+    r = 1.0  # radius
+    angles = np.linspace(0, 2*np.pi, 6)[:-1]  # 5 equally spaced angles
+    coords = np.array([[r * np.cos(angle), r * np.sin(angle)] for angle in angles])
     
-    config = NNGConfig(find_unique=True)
-    game = NavigationGame(config)
+    network = NavigableNetwork(coords)
+    nash = network.build_nash_equilibrium()
     
-    with pytest.warns(RuntimeWarning, match="computationally expensive"):
-        game.build_network(coords)
+    assert nash.shape == (5, 5)
+    assert not nash.diagonal().any()
+    assert network.verify_navigability(nash)
 
-def test_invalid_parameters():
-    """Test validation of alpha and beta parameters."""
-    coords = create_sample_coordinates()
+def test_invalid_inputs():
+    """Test error handling for invalid inputs."""
+    # Empty coordinates
+    with pytest.raises(ValueError, match="Coordinates array cannot be empty"):
+        NavigableNetwork(np.array([]))
     
-    # Test negative alpha
-    config = NNGConfig(
-        game_type=GameType.PARAMETRIC,
-        alpha=-1.0
-    )
-    game = NavigationGame(config)
-    with pytest.raises(ValueError, match="Alpha and beta must be positive"):
-        game.build_network(coords)
+    # Wrong dimensionality
+    with pytest.raises(ValueError, match="Coordinates must be a 2D array"):
+        NavigableNetwork(np.array([0, 0]))
     
-    # Test zero beta
-    config = NNGConfig(
-        game_type=GameType.PARAMETRIC,
-        beta=0.0
-    )
-    game = NavigationGame(config)
-    with pytest.raises(ValueError, match="Alpha and beta must be positive"):
-        game.build_network(coords)
+    # Single node (this should work)
+    single_node = NavigableNetwork(np.array([[0, 0]]))
+    nash = single_node.build_nash_equilibrium()
+    assert nash.shape == (1, 1)
+    assert not nash[0,0]  # No self-loops
+    
+    # Nodes at same position
+    coords = np.array([
+        [0, 0],
+        [0, 0],
+        [1, 0]
+    ])
+    network = NavigableNetwork(coords)
+    nash = network.build_nash_equilibrium()
+    assert network.verify_navigability(nash)
 
-def test_numerical_stability_warning():
-    """Test warning about numerical stability with large beta."""
-    coords = create_sample_coordinates()
+def test_coverage_properties():
+    """Test specific coverage properties using triangle configuration."""
+    coords = np.array([
+        [0, 2],    # A (node 0)
+        [-1, 0],   # B (node 1)
+        [1, 0],    # C (node 2)
+    ])
     
-    config = NNGConfig(
-        game_type=GameType.PARAMETRIC,
-        beta=1e7
-    )
-    game = NavigationGame(config)
+    network = NavigableNetwork(coords)
     
-    with pytest.warns(RuntimeWarning, match="numerical instability"):
-        game.build_network(coords)
+    # Test coverage for node 0 (A)
+    covers_0 = network._get_minimal_covers(0)
+    assert covers_0, "Node 0 should have some required neighbors"
+    
+    # Test coverage for node 1 (B)
+    covers_1 = network._get_minimal_covers(1)
+    assert covers_1, "Node 1 should have some required neighbors"
+    
+    # Test coverage for node 2 (C)
+    covers_2 = network._get_minimal_covers(2)
+    assert covers_2, "Node 2 should have some required neighbors"
 
-def test_consistent_results():
-    """Test that multiple runs with same parameters give same results."""
-    coords = create_sample_coordinates()
-    
-    # Test both game types
-    for game_type in GameType:
-        config = NNGConfig(game_type=game_type)
-        game1 = NavigationGame(config)
-        game2 = NavigationGame(config)
-        
-        adj1, _ = game1.build_network(coords)
-        adj2, _ = game2.build_network(coords)
-        
-        np.testing.assert_array_equal(adj1, adj2)
-
-def test_edge_cases():
-    """Test edge cases and special configurations."""
-    
-    # Test minimal network (2 nodes)
-    coords = create_sample_coordinates(n_nodes=2)
-    config = NNGConfig()
-    game = NavigationGame(config)
-    adj, _ = game.build_network(coords)
-    assert np.sum(adj) > 0  # Should have at least one connection
-    
-    # Test line configuration
-    coords = np.array([[0,0], [1,0], [2,0]])
-    config = NNGConfig()
-    game = NavigationGame(config)
-    adj, _ = game.build_network(coords)
-    assert game._verify_nash_equilibrium(adj)
-    
-    # Test square configuration
-    coords = np.array([[0,0], [0,1], [1,0], [1,1]])
-    config = NNGConfig()
-    game = NavigationGame(config)
-    adj, _ = game.build_network(coords)
-    assert game._verify_nash_equilibrium(adj)
+if __name__ == "__main__":
+    pytest.main([__file__])
