@@ -1,7 +1,7 @@
 """
 Optimally Navigable Networks
 
-This module is a rough* implementation of the work done by [1]. Given some coordinates in the Euclidean space,
+This module is a rough implementation of the work done by [1]. Given some coordinates in the Euclidean space,
 it provides the "backbone" network that is minimally wired while being 100% navigable, thus, being a Nash equilibrium of
 the navigation game. 
 
@@ -16,8 +16,6 @@ Classes:
 
 
 [1] Gulyás, A., Bíró, J. J., Kőrösi, A., Rétvári, G., & Krioukov, D. (2015). Navigable networks as Nash equilibria of navigation games. Nat. Commun., 6(1), 7651. https://doi.org/10.1038/ncomms8651
-* I'm calling it rough implementation because I read the paper, used Claude Sonnet, and implemented the relevant parts for brain networks.
-* The paper itself has a lot more to offer.
 """
 
 from typing import Set
@@ -50,7 +48,7 @@ class NavigableNetwork:
                 Shape: (n_nodes, n_dimensions)
         """
         if len(coordinates) == 0:
-            raise ValueError("Coordinates array cannot be empty, who are you fooling?")
+            raise ValueError("Coordinates array cannot be empty.")
         if coordinates.ndim != 2:
             raise ValueError("Coordinates must be a 2D array with shape (n_nodes, dimension)")
     
@@ -75,9 +73,6 @@ class NavigableNetwork:
         """
         Get minimal set of nodes needed by the source node to enable navigation to all targets.
 
-        For each target node, we need at least one neighbor node where:
-        distance(neighbor, target) <= distance(source, target)
-
         Args:
             source_node (int): Index of the source node
 
@@ -85,33 +80,42 @@ class NavigableNetwork:
             Set[int]: Set of node indices that form the minimal cover set
         """
         required_neighbors: Set[int] = set()
-        
-        # Examine each potential target node
-        for target_node in range(self.n_nodes):
-            # Skip if target is the source node itself
-            if target_node == source_node:
-                continue
-                
-            # Find all nodes that can serve as intermediate points to reach the target
-            potential_covers = [
-                neighbor_node for neighbor_node in range(self.n_nodes) 
-                if (neighbor_node != source_node and  # not the source node itself
-                    # can provide shorter or equal path to target
-                    self.distances[neighbor_node, target_node] <= self.distances[source_node, target_node])
-            ]
-            
-            # Skip if no nodes can provide better coverage
-            if not potential_covers:
-                continue
-                
-            # Select the node closest to the target as the optimal cover
-            best_cover = min(
-                potential_covers,
-                key=lambda node: self.distances[node, target_node]
-            )
-            required_neighbors.add(best_cover)
-            
+        uncovered_targets: Set[int] = set(range(self.n_nodes))
+        uncovered_targets.remove(source_node)
+
+        while uncovered_targets:
+            best_neighbor = None
+            best_distance = float('inf')
+            best_covered = set()
+
+            for neighbor_node in range(self.n_nodes):
+                if neighbor_node == source_node or neighbor_node in required_neighbors:
+                    continue
+
+                # Calculate the set of targets this neighbor can cover
+                covered_targets = {
+                    target for target in uncovered_targets
+                    if self.distances[neighbor_node, target] <= self.distances[source_node, target]
+                }
+
+                # Choose the neighbor that covers the most uncovered targets
+                if len(covered_targets) > len(best_covered) or (
+                    len(covered_targets) == len(best_covered) and
+                    self.distances[neighbor_node, source_node] < best_distance
+                ):
+                    best_neighbor = neighbor_node
+                    best_distance = self.distances[neighbor_node, source_node]
+                    best_covered = covered_targets
+
+            if not best_covered:
+                raise ValueError(f"Node {source_node} cannot cover all targets. Check input data or logic.")
+
+            # Add the best neighbor and remove its covered targets
+            required_neighbors.add(best_neighbor)
+            uncovered_targets -= best_covered
+
         return required_neighbors
+
 
     def build_nash_equilibrium(self) -> np.ndarray:
         """
@@ -133,7 +137,7 @@ class NavigableNetwork:
             optimal_neighbors = self._get_minimal_covers(current_node)
             for neighbor in optimal_neighbors:
                 adjacency[current_node, neighbor] = True
-                
+        
         return adjacency
 
     def verify_navigability(self, adjacency: np.ndarray) -> bool:
