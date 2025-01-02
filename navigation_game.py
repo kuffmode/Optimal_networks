@@ -1,27 +1,6 @@
-"""
-Optimally Navigable Networks
-
-This module is a rough implementation of the work done by [1]. Given some coordinates in the Euclidean space,
-it provides the "backbone" network that is minimally wired while being 100% navigable, thus, being a Nash equilibrium of
-the navigation game. 
-
-The network is represented as:
-- Nodes with coordinates in n-dimensional space
-- Edges between nodes that enable navigation
-- Distance metrics based on Euclidean distance
-- Nash equilibrium properties for optimal connectivity
-
-Classes:
-    NavigableNetwork: Main class implementing the navigable network functionality
-
-
-[1] Gulyás, A., Bíró, J. J., Kőrösi, A., Rétvári, G., & Krioukov, D. (2015). Navigable networks as Nash equilibria of navigation games. Nat. Commun., 6(1), 7651. https://doi.org/10.1038/ncomms8651
-"""
-
-from typing import Set
 import numpy as np
+from typing import Set, Optional
 from scipy.spatial.distance import pdist, squareform
-
 
 class NavigableNetwork:
     """
@@ -51,12 +30,12 @@ class NavigableNetwork:
             raise ValueError("Coordinates array cannot be empty.")
         if coordinates.ndim != 2:
             raise ValueError("Coordinates must be a 2D array with shape (n_nodes, dimension)")
-    
+
         self.coordinates = coordinates
         self.n_nodes = len(coordinates)
         # Calculate pairwise distances between all nodes
         self.distances = self._compute_distances()
-    
+
     def _compute_distances(self) -> np.ndarray:
         """
         Compute pairwise Euclidean distances between all nodes in the network.
@@ -66,64 +45,65 @@ class NavigableNetwork:
                 where distances[i,j] represents the Euclidean distance between
                 nodes i and j.
         """
-
         return squareform(pdist(self.coordinates, metric='euclidean'))
 
     def _get_minimal_covers(self, source_node: int) -> Set[int]:
         """
-        Get minimal set of nodes needed by the source node to enable navigation to all targets.
-
+        Compute the minimal set of neighbors needed for coverage.
         Args:
-            source_node (int): Index of the source node
-
+            source_node (int): Index of the source node.
         Returns:
-            Set[int]: Set of node indices that form the minimal cover set
+            Set[int]: Indices of nodes forming the minimal cover set.
         """
         required_neighbors: Set[int] = set()
-        uncovered_targets: Set[int] = set(range(self.n_nodes))
-        uncovered_targets.remove(source_node)
+        uncovered_targets: Set[int] = set(range(self.n_nodes)) - {source_node}
 
         while uncovered_targets:
             best_neighbor = None
-            best_distance = float('inf')
-            best_covered = set()
+            best_covered_targets = set()
 
-            for neighbor_node in range(self.n_nodes):
-                if neighbor_node == source_node or neighbor_node in required_neighbors:
+            for potential_neighbor in range(self.n_nodes):
+                if potential_neighbor == source_node or potential_neighbor in required_neighbors:
                     continue
 
-                # Calculate the set of targets this neighbor can cover
+                # Calculate targets this neighbor can cover
                 covered_targets = {
                     target for target in uncovered_targets
-                    if self.distances[neighbor_node, target] <= self.distances[source_node, target]
+                    if self.distances[potential_neighbor, target] <= self.distances[source_node, target]
                 }
 
-                # Choose the neighbor that covers the most uncovered targets
-                if len(covered_targets) > len(best_covered) or (
-                    len(covered_targets) == len(best_covered) and
-                    self.distances[neighbor_node, source_node] < best_distance
+                # Prioritize the closest neighbor that covers targets
+                if (
+                    len(covered_targets) > len(best_covered_targets)
+                    or (len(covered_targets) == len(best_covered_targets)
+                        and (best_neighbor is None or self.distances[source_node, potential_neighbor] < self.distances[source_node, best_neighbor]))
                 ):
-                    best_neighbor = neighbor_node
-                    best_distance = self.distances[neighbor_node, source_node]
-                    best_covered = covered_targets
+                    best_neighbor = potential_neighbor
+                    best_covered_targets = covered_targets
 
-            if not best_covered:
+            if not best_covered_targets:
                 raise ValueError(f"Node {source_node} cannot cover all targets. Check input data or logic.")
 
-            # Add the best neighbor and remove its covered targets
+            # Add the best neighbor to the required set and update uncovered targets
             required_neighbors.add(best_neighbor)
-            uncovered_targets -= best_covered
+            uncovered_targets -= best_covered_targets
 
         return required_neighbors
 
 
-    def build_nash_equilibrium(self) -> np.ndarray:
+
+    def build_nash_equilibrium(self, symmetry: Optional[str] = None) -> np.ndarray:
         """
         Build the Nash equilibrium network configuration.
 
         Constructs an adjacency matrix representing the network configuration
         where no node can improve its routing capability by changing its
-        connections unilaterally.
+        connections unilaterally. Optionally enforces symmetry.
+
+        Args:
+            symmetry (Optional[str]): Determines how symmetry is enforced. Can be:
+                - None: No symmetry enforcement (default).
+                - 'forced': Explicitly enforce symmetry by adding mutual edges.
 
         Returns:
             np.ndarray: Boolean adjacency matrix with shape (n_nodes, n_nodes)
@@ -131,13 +111,22 @@ class NavigableNetwork:
         """
         # Initialize adjacency matrix
         adjacency = np.zeros((self.n_nodes, self.n_nodes), dtype=bool)
-        
+
         # For each node, establish connections to its required neighbors
         for current_node in range(self.n_nodes):
             optimal_neighbors = self._get_minimal_covers(current_node)
             for neighbor in optimal_neighbors:
                 adjacency[current_node, neighbor] = True
-        
+
+        if symmetry == 'forced':
+            # Enforce symmetry by making the matrix symmetric
+            for i in range(self.n_nodes):
+                for j in range(self.n_nodes):
+                    if adjacency[i, j] or adjacency[j, i]:
+                        adjacency[i, j] = adjacency[j, i] = True
+
+
+
         return adjacency
 
     def verify_navigability(self, adjacency: np.ndarray) -> bool:
@@ -164,42 +153,42 @@ class NavigableNetwork:
             """
             if start == target:
                 return True
-            
+
             current_node = start
             visited_nodes = {current_node}
-            
+
             while True:
                 # Find unvisited neighbors of current node
                 unvisited_neighbors = [
                     node for node in range(self.n_nodes)
                     if adjacency[current_node, node] and node not in visited_nodes
                 ]
-                
+
                 # If no unvisited neighbors, routing fails
                 if not unvisited_neighbors:
                     return False
-                
+
                 # Select neighbor closest to target
                 next_node = min(
                     unvisited_neighbors,
                     key=lambda node: self.distances[node, target]
                 )
-                
+
                 # Check if we've reached the target
                 if next_node == target:
                     return True
-                
+
                 # Check if we're getting closer to target
                 if self.distances[next_node, target] >= self.distances[current_node, target]:
                     return False  # Routing fails if not getting closer
-                
+
                 current_node = next_node
                 visited_nodes.add(current_node)
-                
+
                 # Prevent infinite loops
                 if len(visited_nodes) == self.n_nodes:
                     return False
-        
+
         # Verify routing between all node pairs
         for source in range(self.n_nodes):
             for destination in range(self.n_nodes):
