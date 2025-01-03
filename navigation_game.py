@@ -1,6 +1,4 @@
-from typing import Union
 import numpy as np
-import scipy
 from scipy.spatial.distance import pdist, squareform
 from scipy.optimize import linprog
 
