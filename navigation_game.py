@@ -1,4 +1,6 @@
+from typing import Union
 import numpy as np
+import scipy
 from scipy.spatial.distance import pdist, squareform
 from scipy.optimize import linprog
 
@@ -125,69 +127,74 @@ class NavigableNetwork:
 
         return adjacency
 
-    def verify_navigability(self, adjacency: np.ndarray) -> bool:
+    def verify_navigability(self, adjacency: np.ndarray,using_communicability:bool=False) -> Union[bool, float]:
         """
         Verify that the network enables successful greedy routing between all node pairs.
 
         Args:
             adjacency (np.ndarray): Boolean adjacency matrix with shape (n_nodes, n_nodes)
                 where adjacency[i,j] = True indicates an edge from node i to node j
+            using_communicability (bool): If True, just uses communicability matrix to verify overall navigability
 
         Returns:
-            bool: True if greedy routing succeeds between all node pairs, False otherwise
+            either bool: True if greedy routing succeeds between all node pairs, False otherwise
+            or float: how much of the network is navigable
         """
-        def can_route(start: int, target: int) -> bool:
-            """
-            Check if greedy routing can reach from start to target node.
+        if using_communicability:
+            return (scipy.linalg.expm(adjacency).astype(bool).sum())/(adjacency.shape[0]**2)
+        else:
+            def can_route(start: int, target: int) -> bool:
+                """
+                Check if greedy routing can reach from start to target node.
 
-            Args:
-                start (int): Starting node index
-                target (int): Target node index
+                Args:
+                    start (int): Starting node index
+                    target (int): Target node index
 
-            Returns:
-                bool: True if route exists, False otherwise
-            """
-            if start == target:
-                return True
-
-            current_node = start
-            visited_nodes = {current_node}
-
-            while True:
-                # Find unvisited neighbors of current node
-                unvisited_neighbors = [
-                    node for node in range(self.n_nodes)
-                    if adjacency[current_node, node] and node not in visited_nodes
-                ]
-
-                # If no unvisited neighbors, routing fails
-                if not unvisited_neighbors:
-                    return False
-
-                # Select neighbor closest to target
-                next_node = min(
-                    unvisited_neighbors,
-                    key=lambda node: self.distances[node, target]
-                )
-
-                # Check if we've reached the target
-                if next_node == target:
+                Returns:
+                    bool: True if route exists, False otherwise
+                """
+                if start == target:
                     return True
 
-                # Check if we're getting closer to target
-                if self.distances[next_node, target] >= self.distances[current_node, target]:
-                    return False  # Routing fails if not getting closer
+                current_node = start
+                visited_nodes = {current_node}
 
-                current_node = next_node
-                visited_nodes.add(current_node)
+                while True:
+                    # Find unvisited neighbors of current node
+                    unvisited_neighbors = [
+                        node for node in range(self.n_nodes)
+                        if adjacency[current_node, node] and node not in visited_nodes
+                    ]
 
-                # Prevent infinite loops
-                if len(visited_nodes) == self.n_nodes:
-                    return False
+                    # If no unvisited neighbors, routing fails
+                    if not unvisited_neighbors:
+                        return False
 
-        # Verify routing between all node pairs
-        for source in range(self.n_nodes):
-            for destination in range(self.n_nodes):
-                if source != destination and not can_route(source, destination):
-                    return False
-        return True
+                    # Select neighbor closest to target
+                    next_node = min(
+                        unvisited_neighbors,
+                        key=lambda node: self.distances[node, target]
+                    )
+
+                    # Check if we've reached the target
+                    if next_node == target:
+                        return True
+
+                    # Check if we're getting closer to target
+                    if self.distances[next_node, target] >= self.distances[current_node, target]:
+                        return False  # Routing fails if not getting closer
+
+                    current_node = next_node
+                    visited_nodes.add(current_node)
+
+                    # Prevent infinite loops
+                    if len(visited_nodes) == self.n_nodes:
+                        return False
+
+            # Verify routing between all node pairs
+            for source in range(self.n_nodes):
+                for destination in range(self.n_nodes):
+                    if source != destination and not can_route(source, destination):
+                        return False
+            return True
