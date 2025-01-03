@@ -64,103 +64,163 @@ class NavigableNetwork:
         # Start with an empty adjacency matrix
         frame_adjacency = np.zeros((self.n_nodes, self.n_nodes), dtype=bool)
 
-        # Go through all node pairs and skip the diagonal
-        for target in range(self.n_nodes):
-            for source in range(self.n_nodes):
+        for source in range(self.n_nodes):
+            for target in range(self.n_nodes):
                 if source == target:
                     continue
-
-                # Check if any other node can replace source as a greedy next-hop to target.
-                # Here we're assuming that the source node is the best choice for the target node unless proven otherwise.
-                is_frame_edge = True
-                for other in range(self.n_nodes):
-                    if other == source or other == target:
+                    
+                # A node covers another node if it's closer to the target
+                # Check if any other node could serve as a better next hop
+                has_better_hop = False
+                for via_node in range(self.n_nodes):
+                    if via_node == source or via_node == target:
                         continue
-                    
-                    # Here's the proof. Some other node is closer to the target than the source.
-                    if self.distances[other, target] < self.distances[source, target]:
-                        is_frame_edge = False
+                        
+                    # If we find a node that's closer to the target than the source
+                    # and is also closer to the target than to the source
+                    if (self.distances[via_node, target] < self.distances[source, target] and
+                        self.distances[source, via_node] < self.distances[source, target]):
+                        has_better_hop = True
                         break
-                    
-                # If no other node is closer to the target than the source, the edge was indeed a frame edge.
-                if is_frame_edge:
+                
+                if not has_better_hop:
                     frame_adjacency[source, target] = True
-
+        
         return frame_adjacency
+
+    def _can_reach_greedily(self, source: int, target: int, current_adjacency: np.ndarray) -> bool:
+        """Check if source can reach target through greedy routing."""
+        current = source
+        visited = {current}
+        
+        while current != target:
+            # Find unvisited neighbors closer to target
+            neighbors = np.where(current_adjacency[current])[0]
+            valid_next = [n for n in neighbors 
+                        if n not in visited and 
+                        self.distances[n, target] < self.distances[current, target]]
+            
+            if not valid_next:
+                return False
+                
+            current = min(valid_next, key=lambda x: self.distances[x, target])
+            visited.add(current)
+            
+            if len(visited) > self.n_nodes:  # Prevent infinite loops
+                return False
+                
+        return True
+
+    def _get_coverage_sets(self, u: int) -> dict:
+        """
+        For node u, compute S_u_v for each possible next hop v.
+        S_u_v = {w|d(v,w) < d(u,w)} means:
+        nodes w that v would be a good next hop for when u wants to reach them
+        (because v is closer to w than u is)
+        
+        Example from paper for node B:
+        S_B_A = {A,D} means A is a good next hop for B to reach A and D
+        because d(A,w) < d(B,w) for w in {A,D}
+        """
+        coverage_sets = {}
+        
+        if u == 0:  # Debug for node A
+            print("\nDistance comparisons for node A:")
+        
+        for v in range(self.n_nodes):  # v is potential next hop
+            if v == u:
+                continue
+                
+            # S_u_v contains nodes that v helps u reach
+            S_u_v = set()
+            if u == 0:
+                print(f"\nComparing for potential next hop v={v}:")
+                
+            for w in range(self.n_nodes):  # w is destination
+                # Check if v is a good next hop from u to reach w
+                if self.distances[v, w] < self.distances[u, w]:
+                    S_u_v.add(w)
+                    if u == 0:
+                        print(f"  w={w}: d({v},w)={self.distances[v,w]:.2f} < d(A,w)={self.distances[u,w]:.2f}")
+                        print(f"  -> {v} helps A reach {w}")
+                        
+            coverage_sets[v] = S_u_v
+            
+        return coverage_sets
 
     def build_nash_equilibrium(self) -> np.ndarray:
         """
-        Build the Nash equilibrium network of the navigation game using linear programming.
-
-        Constructs an adjacency matrix representing the network configuration
-        where no node can improve its routing capability by changing its
-        connections unilaterally. The local constraints are wiring cost (distance) and navigability.
-        See Gulyás, A., Bíró, J. J., Kőrösi, A., Rétvári, G., & Krioukov, D. (2015). Navigable networks as Nash equilibria of navigation games. Nat. Commun., 6(1), 7651. https://doi.org/10.1038/ncomms8651
-
-
-        Returns:
-            np.ndarray: Boolean adjacency matrix with shape (n_nodes, n_nodes)
-                where adjacency[i,j] = True indicates an edge from node i to node j
+        Build Nash equilibrium using minimum set cover.
+        Now using properly oriented coverage sets: S_v_u contains nodes closer to u than to v
         """
-        # Start with frame edges, meaning that the network is navigable at least in the frame topology.
-        adjacency = self._compute_frame_edges()
-
-        # Solve the Nash equilibrium using linear programming (minimizing the cost of wiring)
-        for source_node in range(self.n_nodes):
-            n_vars = self.n_nodes
-            # Objective function: minimize the number of edges
-            c = np.ones(n_vars)
-
-            # Constraints: each target node must be reachable from the source node, so, full navigability.
-            A = []
-            b = []
-            for target_node in range(self.n_nodes):
-                if target_node == source_node:
-                    continue
-                
-                # Constraint: target is covered by at least one neighbor
-                constraint = np.zeros(n_vars)
-                for neighbor in range(self.n_nodes):
-                    if neighbor == source_node:
-                        continue
-                    if self.distances[neighbor, target_node] <= self.distances[source_node, target_node]:
-                        constraint[neighbor] = 1
-
-                A.append(constraint)
-                b.append(1)
-
-            # Bounds: each edge is either present or not.
-            bounds = [(0, 1) for _ in range(n_vars)]
-            result = linprog(c, A_ub=-np.array(A), b_ub=-np.array(b), bounds=bounds, method='highs')
-
-            # Hopefully, the linear programming solver found a solution (it's a convex problem).
+        adjacency = np.zeros((self.n_nodes, self.n_nodes), dtype=bool)
+        
+        for u in range(self.n_nodes):  # u is our source node
+            coverage_sets = self._get_coverage_sets(u)
+            nodes_to_cover = set(range(self.n_nodes)) - {u}
+            
+            # Build coverage matrix for minimum set cover
+            # For each potential connection v, we consider what it can help us reach
+            cover_matrix = np.zeros((len(nodes_to_cover), self.n_nodes-1))
+            
+            # Convert coverage sets to minimum set cover problem
+            # If w is in S_v_u, it means u is a better choice than v for reaching w
+            # Therefore, v is NOT a good choice for reaching w
+            for i, target in enumerate(sorted(nodes_to_cover)):
+                col_idx = 0
+                for v in sorted(nodes_to_cover):  # potential connections
+                    # If target is IN S_u_v, then v helps reach target
+                    if target in coverage_sets[v]:
+                        cover_matrix[i, col_idx] = 1
+                    col_idx += 1
+            
+            # Debug output for node A
+            if u == 0:
+                print("\nCoverage matrix for A:")
+                print(cover_matrix)
+            
+            # Solve minimum set cover
+            c = np.ones(self.n_nodes-1)
+            bounds = [(0, 1) for _ in range(self.n_nodes-1)]
+            
+            # Ensure each target is covered by at least one connection
+            result = linprog(c, A_ub=-cover_matrix, b_ub=-np.ones(len(nodes_to_cover)), 
+                            bounds=bounds, method='highs')
+            
             if result.success:
-                selected_neighbors = np.where(result.x > 0.5)[0]
-                adjacency[source_node, selected_neighbors] = True
+                # Convert solution back to node indices
+                selected = np.zeros(self.n_nodes, dtype=bool)
+                node_list = [v for v in range(self.n_nodes) if v != u]
+                selected[node_list] = result.x > 0.5
+                adjacency[u] = selected
             else:
-                raise ValueError(f"Linear programming failed for source node {source_node}. Or I did with the code.")
-
+                raise ValueError(f"LP failed for source {u}. Coverage matrix:\n{cover_matrix}")
+                
         return adjacency
 
-    def verify_navigability(self, adjacency: np.ndarray, using_communicability:bool=False) -> Union[bool, float]:
+    def verify_navigability(self, adjacency: np.ndarray, using_communicability:bool=False, verbose:bool = False) -> bool:
         """
-        Verify that the network enables successful greedy routing between all node pairs or just checks overall navigability.
+        Verify that the network is fully navigable using either greedy routing (local information) or its communicability matrix (global information).
+        If there is no holes in the communicability matrix, it means all nodes eventually can reach each other so the network is fully navigable BOOM.
+        However, note that in Nash equilibria, the network is expected to be fully navigable using local information,
+        so the communicability matrix is not used to verify equilibrium conditions.
+        See: Zamora-López, G., & Gilson, M. (2024). An integrative dynamical perspective for graph theory and the analysis of complex networks. Chaos, 34(4). https://doi.org/10.1063/5.0202241
 
         Args:
-            adjacency (np.ndarray): Boolean adjacency matrix with shape (n_nodes, n_nodes)
-                where adjacency[i,j] = True indicates an edge from node i to node j
-            using_communicability (bool): If True, just uses communicability matrix to verify overall navigability
+            adjacency (np.ndarray): Boolean/Binary adjacency matrix with shape (n_nodes, n_nodes)
+                where adjacency[i, j] = True (or 1) indicates an edge from node i to node j.
+            using_communicability (bool): If True, use the communicability matrix to verify navigability.
+            verbose (bool): If True, print additional information for debugging.
 
         Returns:
-            either bool: True if greedy routing succeeds between all node pairs, False otherwise
-            or float: how much of the network is navigable
+            bool: True if the network is fully navigable, False otherwise.
         """
-        # The trick here is that we can use the communicability matrix to check overall navigability.
-        # If there's a zero in the communicability matrix, the network is not fully navigable.
         if using_communicability:
-            return (scipy.linalg.expm(adjacency).astype(bool).sum())/(adjacency.shape[0]**2)
-        
-        # Otherwise, we'll check greedy routing between all node pairs. Sure.
+            propagation_matrix = scipy.linalg.expm(adjacency).astype(bool)
+            total_possible_interactions = self.n_nodes**2
+            total_reachable = propagation_matrix.sum()
+            proportion_reachable = total_reachable / total_possible_interactions
+            return proportion_reachable == 1.0
         else:
             def can_route(start: int, target: int) -> bool:
                 """
@@ -174,23 +234,25 @@ class NavigableNetwork:
                     bool: True if route exists, False otherwise
                 """
                 if start == target:
-                    return True # Duh
+                    return True
 
                 current_node = start
                 visited_nodes = {current_node}
 
                 while True:
-                    # Find unvisited neighbors of the current node
+                    # Find unvisited neighbors of current node
                     unvisited_neighbors = [
                         node for node in range(self.n_nodes)
                         if adjacency[current_node, node] and node not in visited_nodes
                     ]
 
-                    # If there's no unvisited neighbors, routing fails :(
+                    # If no unvisited neighbors, routing fails
                     if not unvisited_neighbors:
+                        if verbose:
+                            print(f"Routing failed from node {start} to {target}: No unvisited neighbors from node {current_node}.")
                         return False
 
-                    # Select the neighbor closest to the target
+                    # Select neighbor closest to target
                     next_node = min(
                         unvisited_neighbors,
                         key=lambda node: self.distances[node, target]
@@ -200,59 +262,84 @@ class NavigableNetwork:
                     if next_node == target:
                         return True
 
-                    # Check if we're getting closer to target, if not, BOOM, routing fails
-                    if self.distances[next_node, target] >= self.distances[current_node, target]:
-                        return False
+                    # Check if we're getting closer to target
+                    if self.distances[next_node, target] > self.distances[current_node, target]:
+                        if verbose:
+                            print(f"Routing failed from node {start} to {target}: Next node {next_node} is not closer to target.")
+                        return False  # Routing fails if not getting closer
 
-                    # Move to the next node
                     current_node = next_node
                     visited_nodes.add(current_node)
 
-                    # Prevent infinite loops. Nobody likes infinite loops.
+                    # Prevent infinite loops
                     if len(visited_nodes) == self.n_nodes:
+                        if verbose:
+                            print(f"Routing failed from node {start} to {target}: Visited all nodes without reaching target.")
                         return False
 
-            # Verify routing between all node pairs
-            for source in range(self.n_nodes):
-                for destination in range(self.n_nodes):
-                    if source != destination and not can_route(source, destination):
-                        return False
-            return True
+        # Verify routing between all node pairs
+        for source in range(self.n_nodes):
+            for destination in range(self.n_nodes):
+                if source != destination and not can_route(source, destination):
+                    if verbose:
+                        print(f"Failed to route from {source} to {destination}.")
+                    return False
+        return True
+        
+
     
-    def verify_equilibrium(self, adjacency: np.ndarray) -> bool:
+    def verify_cost_optimization(self, adjacency: np.ndarray) -> bool:
         """
-        Verify that a given adjacency matrix represents a fully navigable but minimally wired network.
-
-        The method first checks if the network is navigable. Then, it iteratively removes each link
-        and checks whether the network remains navigable. If the network remains navigable after any removal,
-        it is not minimally wired and thus, we're not in Nash equilibrium.
+        Check that removing any edge from a node increases its individual cost.
 
         Args:
-            adjacency (np.ndarray): Boolean/Binary adjacency matrix with shape (n_nodes, n_nodes)
-                where adjacency[i, j] = True indicates an edge from node i to node j.
+            adjacency (np.ndarray): Boolean adjacency matrix representing the network.
 
         Returns:
-            bool: True if the network is minimally wired (removing any link breaks navigability),
-                  False otherwise.
+            bool: True if the network satisfies cost optimization for all nodes, False otherwise.
         """
-        # First, verify that the initial network is fully navigable
-        if not self.verify_navigability(adjacency):
-            print("Initial network is not fully navigable. Go tell your jokes elsewhere.")
-            return False
-
-        # Iterate over all edges in the adjacency matrix
-        for i in range(self.n_nodes):
-            for j in range(self.n_nodes):
-                if adjacency[i, j]:
-                    # Create a copy of the adjacency matrix and remove the edge
+        for source in range(self.n_nodes):
+            for target in range(self.n_nodes):
+                if adjacency[source, target]:
                     modified_adjacency = adjacency.copy()
-                    modified_adjacency[i, j] = False
-
-                    # Check if the modified network is still navigable
+                    modified_adjacency[source, target] = False
                     if self.verify_navigability(modified_adjacency):
-                        print(f"Network remained navigable after removing edge ({i}, {j}).")
+                        # Removing the edge didn't break navigability, which means cost is not optimized
                         return False
-
-        # If removing any edge breaks navigability, the network is minimally wired
-        print("The network is minimally wired: removing any link breaks navigability.")
         return True
+
+    def verify_unilateral_improvement(self, adjacency: np.ndarray) -> bool:
+        """
+        Check that no node can reduce its number of edges while maintaining full navigability.
+
+        Args:
+            adjacency (np.ndarray): Boolean adjacency matrix representing the network.
+
+        Returns:
+            bool: True if no node can improve its situation unilaterally, False otherwise.
+        """
+        for source in range(self.n_nodes):
+            for target in range(self.n_nodes):
+                if adjacency[source, target]:
+                    modified_adjacency = adjacency.copy()
+                    modified_adjacency[source, target] = False
+                    if self.verify_navigability(modified_adjacency):
+                        # If navigability is maintained after removing an edge, it means the node could unilaterally improve
+                        return False
+        return True
+
+    def verify_nash_equilibrium(self, adjacency: np.ndarray) -> bool:
+        """
+        Verify that the given network configuration satisfies all conditions of a Nash equilibrium.
+
+        Args:
+            adjacency (np.ndarray): Boolean adjacency matrix representing the network.
+
+        Returns:
+            bool: True if the network is a valid Nash equilibrium, False otherwise.
+        """
+        return (
+            self.verify_navigability(adjacency)
+            and self.verify_cost_optimization(adjacency)
+            and self.verify_unilateral_improvement(adjacency)
+        )
