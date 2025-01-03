@@ -1,6 +1,6 @@
 import numpy as np
-from typing import Set, Optional
 from scipy.spatial.distance import pdist, squareform
+from scipy.optimize import linprog
 
 class NavigableNetwork:
     """
@@ -47,85 +47,81 @@ class NavigableNetwork:
         """
         return squareform(pdist(self.coordinates, metric='euclidean'))
 
-    def _get_minimal_covers(self, source_node: int) -> Set[int]:
+    def _compute_frame_edges(self) -> np.ndarray:
         """
-        Compute the minimal set of neighbors needed for coverage.
-        Args:
-            source_node (int): Index of the source node.
+        Compute the frame edges required for the frame topology.
+
+        Frame edges are defined as edges that must exist because no other node
+        can replace them as the greedy next-hop for a target.
+
         Returns:
-            Set[int]: Indices of nodes forming the minimal cover set.
+            np.ndarray: Boolean adjacency matrix with shape (n_nodes, n_nodes)
+                where adjacency[i, j] = True indicates that the edge i -> j is a frame edge.
         """
-        required_neighbors: Set[int] = set()
-        uncovered_targets: Set[int] = set(range(self.n_nodes)) - {source_node}
+        frame_adjacency = np.zeros((self.n_nodes, self.n_nodes), dtype=bool)
 
-        while uncovered_targets:
-            best_neighbor = None
-            best_covered_targets = set()
-
-            for potential_neighbor in range(self.n_nodes):
-                if potential_neighbor == source_node or potential_neighbor in required_neighbors:
+        for target in range(self.n_nodes):
+            for source in range(self.n_nodes):
+                if source == target:
                     continue
 
-                # Calculate targets this neighbor can cover
-                covered_targets = {
-                    target for target in uncovered_targets
-                    if self.distances[potential_neighbor, target] <= self.distances[source_node, target]
-                }
+                # Check if any other node can replace source as a greedy next-hop to target
+                is_frame_edge = True
+                for other in range(self.n_nodes):
+                    if other == source or other == target:
+                        continue
+                    if self.distances[other, target] < self.distances[source, target]:
+                        is_frame_edge = False
+                        break
 
-                # Prioritize the closest neighbor that covers targets
-                if (
-                    len(covered_targets) > len(best_covered_targets)
-                    or (len(covered_targets) == len(best_covered_targets)
-                        and (best_neighbor is None or self.distances[source_node, potential_neighbor] < self.distances[source_node, best_neighbor]))
-                ):
-                    best_neighbor = potential_neighbor
-                    best_covered_targets = covered_targets
+                if is_frame_edge:
+                    frame_adjacency[source, target] = True
 
-            if not best_covered_targets:
-                raise ValueError(f"Node {source_node} cannot cover all targets. Check input data or logic.")
+        return frame_adjacency
 
-            # Add the best neighbor to the required set and update uncovered targets
-            required_neighbors.add(best_neighbor)
-            uncovered_targets -= best_covered_targets
-
-        return required_neighbors
-
-
-
-    def build_nash_equilibrium(self, symmetry: Optional[str] = None) -> np.ndarray:
+    def build_nash_equilibrium(self) -> np.ndarray:
         """
-        Build the Nash equilibrium network configuration.
+        Build the Nash equilibrium network configuration using linear programming.
 
         Constructs an adjacency matrix representing the network configuration
         where no node can improve its routing capability by changing its
-        connections unilaterally. Optionally enforces symmetry.
-
-        Args:
-            symmetry (Optional[str]): Determines how symmetry is enforced. Can be:
-                - None: No symmetry enforcement (default).
-                - 'forced': Explicitly enforce symmetry by adding mutual edges.
+        connections unilaterally.
 
         Returns:
             np.ndarray: Boolean adjacency matrix with shape (n_nodes, n_nodes)
                 where adjacency[i,j] = True indicates an edge from node i to node j
         """
-        # Initialize adjacency matrix
-        adjacency = np.zeros((self.n_nodes, self.n_nodes), dtype=bool)
+        # Start with frame edges
+        adjacency = self._compute_frame_edges()
 
-        # For each node, establish connections to its required neighbors
-        for current_node in range(self.n_nodes):
-            optimal_neighbors = self._get_minimal_covers(current_node)
-            for neighbor in optimal_neighbors:
-                adjacency[current_node, neighbor] = True
+        for source_node in range(self.n_nodes):
+            n_vars = self.n_nodes
+            c = np.ones(n_vars)
 
-        if symmetry == 'forced':
-            # Enforce symmetry by making the matrix symmetric
-            for i in range(self.n_nodes):
-                for j in range(self.n_nodes):
-                    if adjacency[i, j] or adjacency[j, i]:
-                        adjacency[i, j] = adjacency[j, i] = True
+            A = []
+            b = []
+            for target_node in range(self.n_nodes):
+                if target_node == source_node:
+                    continue
 
+                constraint = np.zeros(n_vars)
+                for neighbor in range(self.n_nodes):
+                    if neighbor == source_node:
+                        continue
+                    if self.distances[neighbor, target_node] <= self.distances[source_node, target_node]:
+                        constraint[neighbor] = 1
 
+                A.append(constraint)
+                b.append(1)
+
+            bounds = [(0, 1) for _ in range(n_vars)]
+            result = linprog(c, A_ub=-np.array(A), b_ub=-np.array(b), bounds=bounds, method='highs')
+
+            if result.success:
+                selected_neighbors = np.where(result.x > 0.5)[0]
+                adjacency[source_node, selected_neighbors] = True
+            else:
+                raise ValueError(f"Linear programming failed for source node {source_node}.")
 
         return adjacency
 
