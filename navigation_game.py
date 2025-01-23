@@ -3,7 +3,7 @@ from scipy.spatial.distance import pdist, squareform
 from scipy.optimize import linprog
 from numpy.typing import NDArray
 from dataclasses import dataclass
-from typing import Optional, Dict, Tuple
+from typing import Callable, List, Optional, Dict, Tuple
 from enum import Enum
 from numba import njit
 from joblib import Parallel, delayed
@@ -527,6 +527,7 @@ class ParameterSpace:
                 f"for FIXED mode or {dev_params} for DEVELOPMENTAL mode."
             )
 
+
 class NetworkFitter:
     """Fits network parameters to match empirical data."""
     
@@ -534,19 +535,24 @@ class NetworkFitter:
                  coordinates: np.ndarray,
                  empirical_adj: np.ndarray,
                  parameter_space: ParameterSpace,
-                 n_iterations: int = 300,
+                 n_iterations: int = 1_000,
                  mode: SimulationMode = SimulationMode.FIXED,
                  n_trials: int = 50,
-                 random_state: Optional[int] = None):
+                 random_state: Optional[int] = None,
+                 evaluator_fn: Optional[Callable[[np.ndarray], float]] = None):
         """
         Args:
-            coordinates: Node coordinates
-            empirical_adj: Empirical adjacency matrix to match
-            parameter_space: Definition of parameters to fit and their ranges
-            n_iterations: Number of iterations for each simulation
-            mode: Simulation mode (FIXED or DEVELOPMENTAL)
-            n_trials: Number of optimization trials
-            random_state: Random seed
+            coordinates: Node coordinates (n_nodes x dimension).
+            empirical_adj: Empirical adjacency matrix to match.
+            parameter_space: Definition of parameters to fit and their ranges.
+            n_iterations: Number of iterations for each simulation.
+            mode: Simulation mode (FIXED or DEVELOPMENTAL).
+            n_trials: Number of optimization trials.
+            random_state: Random seed.
+            evaluator_fn: Optional custom evaluator function. If provided, it must
+                          accept a single argument (the final synthetic adjacency)
+                          and return a scalar “distance” or “score” (lower = better).
+                          By default, the built-in KS-based evaluator is used.
         """
         self.coordinates = coordinates
         self.empirical_adj = empirical_adj
@@ -556,30 +562,34 @@ class NetworkFitter:
         self.n_trials = n_trials
         self.random_state = random_state
         self.euclidean_distance = squareform(pdist(coordinates))
-        
+
         # Validate parameter space against mode
         self._validate_parameter_space()
-        
-        # Pre-compute empirical metrics
-        self._compute_empirical_metrics()
-    
+
+        # If no custom evaluator was provided, use our default approach
+        self.evaluator_fn = evaluator_fn
+        if self.evaluator_fn is None:
+            # We do the default KS-based approach
+            self._compute_empirical_metrics()  # store needed metrics
+            self.evaluator_fn = self._default_evaluate_network  # KS-based
+
     def _validate_parameter_space(self):
         """Ensure parameter space is valid for chosen mode."""
         if self.mode == SimulationMode.FIXED:
             valid_params = {'alpha', 'beta', 'temperature', 'connectivity_penalty'}
         else:
             valid_params = {'alpha', 'beta_infinity', 'tau_beta', 't0', 
-                          'tau_t', 'connectivity_penalty'}
+                            'tau_t', 'connectivity_penalty'}
             
         all_params = (set(self.parameter_space.param_ranges.keys()) | 
-                     set(self.parameter_space.fixed_params.keys()))
+                      set(self.parameter_space.fixed_params.keys()))
                      
         if not all_params <= valid_params:
             raise ValueError(f"Invalid parameters for mode {self.mode}. "
-                           f"Valid parameters are: {valid_params}")
-    
+                             f"Valid parameters are: {valid_params}")
+
     def _compute_empirical_metrics(self):
-        """Pre-compute metrics for empirical network."""
+        """Pre-compute metrics for the default KS-based evaluator."""
         # Degrees
         self.empirical_degrees = np.sum(self.empirical_adj, axis=0)
         
@@ -594,33 +604,31 @@ class NetworkFitter:
         ).values())
         
         # Edge distances
-        self.empirical_distances = self.euclidean_distance[
+        self.empirical_edge_distances = self.euclidean_distance[
             np.triu(self.empirical_adj, 1) > 0
         ]
-    
-    def _evaluate_network(self, synthetic_adj: np.ndarray) -> float:
-        """Compute similarity score between synthetic and empirical networks."""
-        # Get synthetic metrics
+
+    def _default_evaluate_network(self, synthetic_adj: np.ndarray) -> float:
+        """Default KS-based evaluator for the synthetic vs. empirical network."""
+        # Synthetic metrics
         degrees_synthetic = np.sum(synthetic_adj, axis=0)
-        
         clustering_synthetic = nx.clustering(nx.from_numpy_array(synthetic_adj))
-        
         betweenness_synthetic = nx.betweenness_centrality(nx.from_numpy_array(synthetic_adj))
-        
-        distance_synthetic = self.euclidean_distance[np.triu(synthetic_adj, 1) > 0]
-        
-        # Compute KS statistics
-        ks_scores = [
-            ks_2samp(degrees_synthetic, self.empirical_degrees)[0],
-            ks_2samp(list(clustering_synthetic.values()), self.empirical_clustering)[0],
-            ks_2samp(list(betweenness_synthetic.values()), self.empirical_betweenness)[0],
-            ks_2samp(distance_synthetic, self.empirical_distances)[0]
+        edge_distances_synthetic = self.euclidean_distance[
+            np.triu(synthetic_adj, 1) > 0
         ]
         
-        return np.max(ks_scores)
-    
-    def _objective(self, params: list) -> float:
-        """Objective function for optimization."""
+        # KS distances
+        ks_degree = ks_2samp(degrees_synthetic, self.empirical_degrees)[0]
+        ks_clust = ks_2samp(list(clustering_synthetic.values()), self.empirical_clustering)[0]
+        ks_between = ks_2samp(list(betweenness_synthetic.values()), self.empirical_betweenness)[0]
+        ks_edgedist = ks_2samp(edge_distances_synthetic, self.empirical_edge_distances)[0]
+        
+        # The objective is to minimize the "distance," so we take the maximum of the four
+        return max(ks_degree, ks_clust, ks_between, ks_edgedist)
+
+    def _objective(self, params: List[float]) -> float:
+        """Objective function for the Bayesian or random optimization."""
         # Combine fitted and fixed parameters
         param_dict = dict(zip(self.parameter_space.param_ranges.keys(), params))
         param_dict.update(self.parameter_space.fixed_params)
@@ -645,49 +653,39 @@ class NetworkFitter:
                 connectivity_penalty=param_dict.get('connectivity_penalty', 100.0)
             )
         
-        # Run simulation and evaluate
+        # Run simulation
         network = DevelopingNetwork(self.coordinates, params=network_params)
-        adj_history = network.simulate(self.n_iterations)
-        return self._evaluate_network(adj_history[:, :, -1])
+        adjacency_history = network.simulate(self.n_iterations)
+        final_adj = adjacency_history[:, :, -1]
+        
+        # Evaluate final adjacency with either the default or custom evaluator
+        score = self.evaluator_fn(final_adj)
+        return score
     
     def fit(self) -> FittingResults:
         """Run parameter fitting procedure."""
-        # Create optimization space from parameter ranges
+        # Create optimization space
         space = [
             Real(low, high, name=name)
             for name, (low, high) in self.parameter_space.param_ranges.items()
         ]
         
-        # Run optimization
-        with tqdm(total=self.n_trials, desc="Fitting parameters") as pbar:
-            def callback(res):
-                pbar.update(1)
-                
-            result = gp_minimize(
-                self._objective,
-                space,
-                n_calls=self.n_trials,
-                random_state=self.random_state,
-                callback=callback
-            )
+        # Run optimization (example with skopt)
+        result = gp_minimize(
+            func=self._objective,
+            dimensions=space,
+            n_calls=self.n_trials,
+            random_state=self.random_state
+        )
         
-        # Package results
-        param_names = list(self.parameter_space.param_ranges.keys())
-        best_params = dict(zip(param_names, result.x))
+        # Collect results
+        best_params = dict(zip(self.parameter_space.param_ranges.keys(), result.x))
         best_params.update(self.parameter_space.fixed_params)
-        
-        all_params = [dict(zip(param_names, x)) for x in result.x_iters]
-        for params in all_params:
-            params.update(self.parameter_space.fixed_params)
         
         return FittingResults(
             best_params=best_params,
-            all_params=all_params,
+            all_params=result.x_iters,
             all_scores=result.func_vals,
             best_score=result.fun,
-            convergence_data={
-                'models': result.models,
-                'space': result.space,
-                'specs': result.specs
-            }
+            convergence_data={'skopt_result': result}
         )
