@@ -10,4 +10,4 @@ wheels/
 .venv
 .DS_Store
 
-/datasets/Individual_Connectomes.mat
+/datasets/
