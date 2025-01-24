@@ -3,7 +3,7 @@ from numba import njit
 import warnings
 from functools import lru_cache
 import numpy as np
-
+import networkx as nx
 from typing import Dict, List, Optional, Callable, TypeVar, Any
 import numpy.typing as npt
 from skopt import gp_minimize
@@ -14,6 +14,34 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 import warnings
 from generative import simulate_network_evolution, resistance_distance
+
+def evaluator(synthetic, empirical, euclidean_distance):
+    degrees_synthetic = np.sum(synthetic, axis=0)
+    degrees_empirical = np.sum(empirical, axis=0)
+    ks_degree = ks_2samp(degrees_synthetic, degrees_empirical)
+    
+    clustering_synthetic = nx.clustering(nx.from_numpy_array(synthetic))
+    clustering_empirical = nx.clustering(nx.from_numpy_array(empirical))
+    ks_clustering = ks_2samp(list(clustering_synthetic.values()), list(clustering_empirical.values()))
+    
+    betweenness_synthetic = nx.betweenness_centrality(nx.from_numpy_array(synthetic))
+    betweenness_empirical = nx.betweenness_centrality(nx.from_numpy_array(empirical))
+    ks_betweenness = ks_2samp(list(betweenness_synthetic.values()), list(betweenness_empirical.values()))
+    
+    distance_synthetic = euclidean_distance[np.triu(synthetic, 1) > 0]
+    distance_empirical = euclidean_distance[np.triu(empirical, 1) > 0]
+    ks_distance = ks_2samp(distance_synthetic, distance_empirical)
+    
+    results = {"energy":np.max([ks_degree[0], 
+                                ks_clustering[0], 
+                                ks_betweenness[0], 
+                                ks_distance[0]]),
+               "ks_degrees": ks_degree[0],
+               "ks_clustering": ks_clustering[0],
+               "ks_betweenness": ks_betweenness[0],
+               "ks_distance": ks_distance[0]}
+    
+    return results
 
 @njit
 def fast_degrees(adj: np.ndarray) -> np.ndarray:
@@ -180,6 +208,10 @@ def fast_evaluator(synthetic: np.ndarray,
                "ks_distance": ks_stats[3]}
     return results
 
+def density_distance(final_network,empirical):
+    density_synthetic = np.sum(final_network) / (final_network.shape[0]**2)
+    density_empirical = np.sum(empirical) / (empirical.shape[0]**2)
+    return np.abs(density_synthetic - density_empirical)
 
 FloatArray = npt.NDArray[np.float64]
 Parameter = TypeVar('Parameter', float, FloatArray)
@@ -206,6 +238,7 @@ class NetworkOptimizer:
         evaluator: Optional[Callable] = None,
         n_parallel: int = -1,
         distance_fn: Optional[Callable] = resistance_distance,
+        evaluator_kwargs: Optional[Dict[str, Any]] = None,
         random_seed: Optional[int] = None
     ):
         """
@@ -215,10 +248,11 @@ class NetworkOptimizer:
             coordinates: Node coordinates (n_nodes, n_dimensions)
             empirical_network: Target network to match
             n_iterations: Number of iterations for each simulation
-            evaluator: Custom evaluation function (defaults to fast_evaluator)
+            evaluator: Custom evaluation function (defaults to density distance)
             n_parallel: Number of parallel jobs (-1 for all cores)
             distance_fn: Function to compute the "signalling distance" between nodes,
                          defaults to resistance distance
+            evaluator_kwargs: Additional arguments for the evaluator
             random_seed: Random seed for reproducibility
         """
         self.coordinates = coordinates
@@ -227,9 +261,10 @@ class NetworkOptimizer:
         self.n_parallel = n_parallel
         self.random_seed = random_seed
         self.distance_fn = distance_fn
+        self.evaluator_kwargs = evaluator_kwargs if evaluator_kwargs else {}
         # Set up evaluator
         if evaluator is None:
-            self.evaluator = fast_evaluator
+            self.evaluator = density_distance
         else:
             self.evaluator = evaluator
             
@@ -255,11 +290,11 @@ class NetworkOptimizer:
         """Run simulation with given parameters and evaluate."""
         
         # Create parameter trajectories if needed
-        alpha = params.get('alpha', np.linspace(1.0, 1.0,self.n_iterations))
-        beta = params.get('beta', np.linspace(1.0, 1.0,self.n_iterations))
+        alpha = params.get('alpha', np.full(self.n_iterations, 1.0))
+        beta = params.get('beta', np.full(self.n_iterations, 0.1))
         noise = params.get('noise', np.zeros(self.n_iterations))
         penalty = params.get('connectivity_penalty', np.zeros(self.n_iterations))
-        
+        evaluator_kwargs = params.get('evaluator_kwargs', {})
         # Add trajectory parameters if present
         if 'beta_growth' in params:
             beta = np.linspace(0, beta, self.n_iterations)
@@ -284,7 +319,7 @@ class NetworkOptimizer:
         score = self.evaluator(
             final_network,
             self.empirical_network,
-            self.euclidean_distance
+            **evaluator_kwargs,
         )
         
         return score
@@ -313,20 +348,18 @@ class NetworkOptimizer:
             OptimizationResults containing best parameters and optimization history
         """
         space = self._create_parameter_space(param_ranges)
-        with tqdm(total=n_calls, desc="Bayesian Optimization", position=0) as pbar:
 
-            # Create objective function with named arguments
-            @use_named_args(space)
-            def objective(**params):
-                # Run multiple samples in parallel
-                scores = Parallel(n_jobs=self.n_parallel)(
-                delayed(self._simulate_with_params)(params, i)
-                for i in tqdm(range(n_parallel_samples), 
-                            desc="Optimization Iteration",
-                            position=1, 
-                            leave=False))
-                pbar.update(1)
-                return np.mean([score['energy'] for score in scores])
+        # Create objective function with named arguments
+        @use_named_args(space)
+        def objective(**params):
+            # Run multiple samples in parallel
+            scores = Parallel(n_jobs=self.n_parallel)(
+            delayed(self._simulate_with_params)(params, i)
+            for i in tqdm(range(n_parallel_samples), 
+                        desc="Optimization Iteration",
+                        position=1, 
+                        leave=False))
+            return np.mean([score for score in scores])
             
         # Run optimization
         with warnings.catch_warnings():

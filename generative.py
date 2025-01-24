@@ -1,12 +1,77 @@
 
 from typing import Callable, Union, Literal, TypeAlias, Optional
 import numpy as np
+import numba
 import numpy.typing as npt
-from numba import njit
+from numba.core.errors import TypingError
+from numba import njit, jit, NumbaError
 from joblib import Parallel, delayed
 from tqdm import tqdm
 from scipy.spatial.distance import pdist, squareform
+numba.config.DISABLE_JIT_WARNINGS = 1
 
+def jit_safe(nopython=True, **jit_kwargs):
+    """
+    A safe JIT wrapper that falls back to normal Python if
+    Numba cannot compile the function in nopython mode.
+
+    Parameters
+    ----------
+    nopython : bool
+        Whether to try nopython mode first.
+    jit_kwargs : dict
+        Additional arguments passed to @jit.
+    """
+    def decorator(func):
+        if not nopython:
+            return func  # Skip JIT entirely if nopython=False
+        
+        try:
+            # Try compiling in nopython mode
+            jitted = jit(nopython=True, **jit_kwargs)(func)
+            # Test compilation with dummy input if possible
+            # (you can define test cases if needed)
+            return jitted
+        except (TypingError, NumbaError) as e:
+            # Fallback to non-JIT version
+            print(f"Numba could not compile {func.__name__}: {e}")
+            return func  # Return the original function if JIT fails
+    return decorator
+
+@njit
+def _diag_indices(n):
+    """
+    Returns the indices of the diagonal elements of an n x n matrix.
+    """
+    rows = np.arange(n)
+    cols = np.arange(n)
+    return rows, cols
+
+@njit
+def _set_diagonal(matrix:np.ndarray, value:float=0.0):
+    n = matrix.shape[0]
+    rows, cols = _diag_indices(n)
+    for i in range(n):
+        matrix[rows[i], cols[i]] = value
+    return matrix
+
+@jit_safe()
+def process_matrix(matrix):
+    # Replace np.nan_to_num with a manual implementation
+    n, m = matrix.shape
+    result = np.empty_like(matrix)
+    for i in range(n):
+        for j in range(m):
+            val = matrix[i, j]
+            if np.isnan(val):
+                result[i, j] = 0
+            elif val == np.inf:
+                result[i, j] = 0
+            elif val == -np.inf:
+                result[i, j] = 0
+            else:
+                result[i, j] = val
+    return result
 # Type Definitions
 FloatArray = npt.NDArray[np.float64]
 Trajectory: TypeAlias = Union[float, FloatArray]
@@ -159,6 +224,43 @@ def compute_component_sizes(adjacency: FloatArray) -> FloatArray:
             
     return sizes
 
+@jit_safe()
+def propagation_distance(adjacency_matrix, coordinates):
+    """
+    Computes the propagation distance as:
+        - log( (I - 0.5 A)^{-1} * (I - 0.5 A)^{-1}.T )
+
+    Parameters
+    ----------
+    adjacency_matrix : np.ndarray
+        A square adjacency matrix (must be invertible for I - 0.5*A).
+    coordinates : np.ndarray
+        Not used in this computation, but kept for signature consistency.
+    
+    Returns
+    -------
+    dist : np.ndarray
+        The elementwise -log of the propagation matrix.
+    """
+    N = adjacency_matrix.shape[0]
+    adjacency_matrix = adjacency_matrix.astype(np.float64)
+    spectral_radius = np.max(np.abs(np.linalg.eigvals(adjacency_matrix)))
+    adjacency_matrix /= spectral_radius
+    # Identity
+    I = np.eye(N, dtype=np.float64)
+    
+    # M = I - 0.5 * A
+    M = I - 0.5 * adjacency_matrix
+    
+    # inverse_matrix = M^{-1}
+    inverse_matrix = np.linalg.inv(M)
+    
+    # propagation_matrix = M^{-1} * (M^{-1})^T
+    propagation_matrix = inverse_matrix @ inverse_matrix.T
+    propagation_matrix = _set_diagonal(propagation_matrix, 0)
+    propagation_dist = -np.log(propagation_matrix)
+    return process_matrix(propagation_dist)
+
 @njit
 def resistance_distance(adjacency: FloatArray, coordinates: FloatArray) -> FloatArray:
     """
@@ -206,7 +308,52 @@ def resistance_distance(adjacency: FloatArray, coordinates: FloatArray) -> Float
             
     return resistance
 
-@njit
+@jit_safe()
+def shortest_path_distance(adjacency_matrix,coordinates):
+    """
+    Computes shortest-path distances between all pairs of nodes
+    using the Floyd-Warshall algorithm.
+
+    Parameters
+    ----------
+    adjacency_matrix : np.ndarray
+        A square adjacency matrix where entry (i, j) represents
+        the weight of the edge from node i to j. Use np.inf for no direct edge.
+
+    Returns
+    -------
+    dist_matrix : np.ndarray
+        A square matrix where entry (i, j) represents the shortest path
+        distance from node i to j.
+    """
+    N = adjacency_matrix.shape[0]
+    
+    # Create distance matrix as a copy of the adjacency matrix
+    dist_matrix = adjacency_matrix.astype(np.float64)
+    
+    # Convert zero entries (non-diagonal) to np.inf (no connection)
+    for i in range(N):
+        for j in range(N):
+            if i != j and dist_matrix[i, j] == 0:
+                dist_matrix[i, j] = np.inf
+    
+    # Ensure diagonal is 0 (distance from a node to itself)
+    for i in range(N):
+        dist_matrix[i, i] = 0.0
+
+    # Floyd-Warshall algorithm
+    for k in range(N):  # Intermediate node
+        for i in range(N):  # Source node
+            for j in range(N):  # Destination node
+                # Relax the distance via intermediate node k
+                dist_matrix[i, j] = min(
+                    dist_matrix[i, j],
+                    dist_matrix[i, k] + dist_matrix[k, j]
+                )
+
+    return dist_matrix
+
+@jit_safe()
 def compute_node_payoff(
     node: int,
     adjacency: FloatArray,
