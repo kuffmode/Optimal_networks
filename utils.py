@@ -208,10 +208,16 @@ def fast_evaluator(synthetic: np.ndarray,
                "ks_distance": ks_stats[3]}
     return results
 
-def density_distance(final_network,empirical):
-    density_synthetic = np.sum(final_network) / (final_network.shape[0]**2)
-    density_empirical = np.sum(empirical) / (empirical.shape[0]**2)
-    return np.abs(density_synthetic - density_empirical)
+@njit
+def density_distance(final_network, empirical):
+    # Compute synthetic network density
+    density_synthetic = np.sum(final_network) / (final_network.shape[0] * final_network.shape[0])
+    
+    # Compute empirical network density
+    density_empirical = np.sum(empirical) / (empirical.shape[0] * empirical.shape[0])
+    
+    # Return absolute difference
+    return abs(density_synthetic - density_empirical)
 
 FloatArray = npt.NDArray[np.float64]
 Parameter = TypeVar('Parameter', float, FloatArray)

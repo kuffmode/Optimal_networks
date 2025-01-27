@@ -353,6 +353,78 @@ def shortest_path_distance(adjacency_matrix,coordinates):
 
     return dist_matrix
 
+
+@jit_safe()
+def search_information(W, coordinates):
+    """
+    Calculate search information for a memoryless random walker.
+
+    Parameters
+    ----------
+    W : (N, N) ndarray
+        Weighted/unweighted, directed/undirected connection weight matrix.
+    coordinates : (N, 2) ndarray
+        Coordinates of nodes (n_nodes, n_dimensions).
+
+    Returns
+    -------
+    SI : (N, N) ndarray
+        Pairwise search information matrix. The diagonal is set to 0.
+        Edges without a valid shortest path are set to np.inf.
+    """
+    N = W.shape[0]
+
+    # Normalize weights to transition probabilities
+    T = W / np.sum(W, axis=1)[:, None]
+
+    # Precompute shortest path distances using Floyd-Warshall algorithm
+    dist_matrix = W.astype(np.float64)
+    p_mat = np.zeros((N, N), dtype=np.int32) - 1  # Predecessor matrix
+
+    for i in range(N):
+        for j in range(N):
+            if i != j and dist_matrix[i, j] == 0:
+                dist_matrix[i, j] = np.inf
+            else:
+                p_mat[i, j] = i
+
+    for k in range(N):  # Intermediate node
+        for i in range(N):  # Source node
+            for j in range(N):  # Destination node
+                if dist_matrix[i, k] + dist_matrix[k, j] < dist_matrix[i, j]:
+                    dist_matrix[i, j] = dist_matrix[i, k] + dist_matrix[k, j]
+                    p_mat[i, j] = p_mat[k, j]
+
+    # Initialize search information matrix
+    SI = np.full((N, N), np.inf)
+
+    # Compute search information
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                SI[i, j] = 0.0
+                continue
+
+            # Retrieve shortest path from predecessor matrix
+            path = []
+            current = j
+            while current != -1 and current != i:
+                path.append(current)
+                current = p_mat[i, current]
+            if current == i:
+                path.append(i)
+                path.reverse()
+            else:
+                continue  # No valid path
+
+            # Compute search information along the shortest path
+            product = 1.0
+            for k in range(len(path) - 1):
+                product *= T[path[k], path[k + 1]]
+            SI[i, j] = -np.log2(product)
+
+    return SI
+
 @jit_safe()
 def compute_node_payoff(
     node: int,
