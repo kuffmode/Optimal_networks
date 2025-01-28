@@ -487,7 +487,7 @@ def simulate_network_evolution(
     connectivity_penalty: Trajectory,
     initial_adjacency: Optional[FloatArray] = None,
     n_jobs: int = -1,
-    batch_size: int = 4,
+    batch_size: int = 32,
     random_seed: Optional[int] = None
 ) -> FloatArray:
     """

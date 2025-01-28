@@ -24,6 +24,15 @@ wheels = [
 ]
 
 [[package]]
+name = "attrs"
+version = "25.1.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/49/7c/fdf464bcc51d23881d110abd74b512a42b3d5d376a55a831b44c603ae17f/attrs-25.1.0.tar.gz", hash = "sha256:1c97078a80c814273a76b2a298a932eb681c87415c11dee0a6921de7f1b02c3e", size = 810562 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/fc/30/d4986a882011f9df997a55e6becd864812ccfcd821d64aac8570ee39f719/attrs-25.1.0-py3-none-any.whl", hash = "sha256:c75a69e28a550a7e93789579c22aa26b0f5b83b75dc4e08fe092980051e1090a", size = 63152 },
+]
+
+[[package]]
 name = "backcall"
 version = "0.2.0"
 source = { registry = "https://pypi.org/simple" }
@@ -266,6 +275,15 @@ wheels = [
 ]
 
 [[package]]
+name = "future"
+version = "1.0.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a7/b2/4140c69c6a66432916b26158687e821ba631a4c9273c474343badf84d3ba/future-1.0.0.tar.gz", hash = "sha256:bd2968309307861edae1458a4f8a4f3598c03be43b97521076aebf5d94c07b05", size = 1228490 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/da/71/ae30dadffc90b9006d77af76b393cb9dfbfc9629f339fc1574a1c52e6806/future-1.0.0-py3-none-any.whl", hash = "sha256:929292d34f5872e70396626ef385ec22355a1fae8ad29e1a734c3e43f9fbc216", size = 491326 },
+]
+
+[[package]]
 name = "iniconfig"
 version = "2.0.0"
 source = { registry = "https://pypi.org/simple" }
@@ -279,7 +297,7 @@ name = "ipykernel"
 version = "6.29.5"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "appnope", marker = "platform_system == 'Darwin'" },
+    { name = "appnope", marker = "sys_platform == 'darwin'" },
     { name = "comm" },
     { name = "debugpy" },
     { name = "ipython" },
@@ -560,6 +578,7 @@ dependencies = [
     { name = "pandas" },
     { name = "psutil" },
     { name = "pulp" },
+    { name = "pyswarms" },
     { name = "pytest" },
     { name = "scikit-optimize" },
     { name = "scipy" },
@@ -579,6 +598,7 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.0.3" },
     { name = "psutil", specifier = ">=6.1.1" },
     { name = "pulp", specifier = ">=2.9.0" },
+    { name = "pyswarms", specifier = ">=1.3.0" },
     { name = "pytest", specifier = ">=8.3.4" },
     { name = "scikit-optimize", specifier = ">=0.10.2" },
     { name = "scipy", specifier = ">=1.10.1" },
@@ -796,6 +816,24 @@ source = { registry = "https://pypi.org/simple" }
 sdist = { url = "https://files.pythonhosted.org/packages/83/08/13f3bce01b2061f2bbd582c9df82723de943784cf719a35ac886c652043a/pyparsing-3.1.4.tar.gz", hash = "sha256:f86ec8d1a83f11977c9a6ea7598e8c27fc5cddfa5b07ea2241edbbde1d7bc032", size = 900231 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/e5/0c/0e3c05b1c87bb6a1c76d281b0f35e78d2d80ac91b5f8f524cebf77f51049/pyparsing-3.1.4-py3-none-any.whl", hash = "sha256:a6a7ee4235a3f944aa1fa2249307708f893fe5717dc603503c6c7969c070fb7c", size = 104100 },
+]
+
+[[package]]
+name = "pyswarms"
+version = "1.3.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "attrs" },
+    { name = "future" },
+    { name = "matplotlib" },
+    { name = "numpy" },
+    { name = "pyyaml" },
+    { name = "scipy" },
+    { name = "tqdm" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/ea/c7/2ec3ac6e8e1346d3728379e4845660048e7054e2ddf14c5bdf11f2a8ff7e/pyswarms-1.3.0.tar.gz", hash = "sha256:1204aa9c332c662113e3c37d1b109906f4a0859b29ded80c1582dc66387ce34b", size = 28733177 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/d1/fd/5c2baba82425b75baf7dbec5af57219cd252aa8a1ace4f5cd1d88e472276/pyswarms-1.3.0-py2.py3-none-any.whl", hash = "sha256:8a51e55fbc26b0a6538913a0f2439c481b3891787b7ea98cb2cc063f834dd154", size = 104090 },
 ]
 
 [[package]]
@@ -1076,7 +1114,7 @@ name = "tqdm"
 version = "4.67.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
-    { name = "colorama", marker = "platform_system == 'Windows'" },
+    { name = "colorama", marker = "sys_platform == 'win32'" },
 ]
 sdist = { url = "https://files.pythonhosted.org/packages/a8/4b/29b4ef32e036bb34e4ab51796dd745cdba7ed47ad142a9f4a1eb8e0c744d/tqdm-4.67.1.tar.gz", hash = "sha256:f8aef9c52c08c13a65f30ea34f4e5aac3fd1a34959879d7e59e63027286627f2", size = 169737 }
 wheels = [

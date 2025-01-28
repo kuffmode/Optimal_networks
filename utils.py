@@ -14,6 +14,8 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 import warnings
 from generative import simulate_network_evolution, resistance_distance
+from pyswarms.single.global_best import GlobalBestPSO
+from multiprocessing import cpu_count
 
 def evaluator(synthetic, empirical, euclidean_distance):
     degrees_synthetic = np.sum(synthetic, axis=0)
@@ -403,3 +405,91 @@ class NetworkOptimizer:
                 'specs': result.specs
             }
         )
+        
+        
+@dataclass
+class PSOResults:
+    best_parameters: Dict[str, float]
+    best_score: float
+    position_history: np.ndarray
+    cost_history: np.ndarray
+
+class ParallelNetworkOptimizer:
+    def __init__(
+        self,
+        simulation_model: Callable,
+        evaluation_function: Callable,
+        param_bounds: Dict[str, tuple],
+        sim_kwargs: Dict[str, Any] = {},
+        eval_kwargs: Dict[str, Any] = {},
+        random_seed: Optional[int] = None
+    ):
+        self.simulation_model = simulation_model
+        self.evaluation_function = evaluation_function
+        self.sim_kwargs = sim_kwargs
+        self.eval_kwargs = eval_kwargs
+        self.param_names = list(param_bounds.keys())
+        self.bounds = (
+            np.array([b[0] for b in param_bounds.values()]),
+            np.array([b[1] for b in param_bounds.values()])
+        )
+        if random_seed is not None:
+            np.random.seed(random_seed)
+
+    def _objective(self, positions):
+        scores = []
+        for pos in positions:
+            # Convert position array to parameter dictionary
+            params = dict(zip(self.param_names, pos))
+            
+            # Run simulation with current parameters
+            simulation_result = self.simulation_model(
+                **params,
+                **self.sim_kwargs
+            )
+            
+            # Evaluate simulation result
+            score = self.evaluation_function(
+                simulation_result[:,:, -1],
+                **self.eval_kwargs
+            )
+            
+            scores.append(score)
+            
+        return np.array(scores)
+
+    def optimize(
+        self,
+        n_particles: int = 20,
+        n_iterations: int = 50,
+        pso_kwargs: Dict[str, Any] = {}
+    ) -> PSOResults:
+        # Set up PSO optimizer with default parameters
+        optimizer = GlobalBestPSO(
+            n_particles=n_particles,
+            dimensions=len(self.param_names),
+            options={
+                'c1': 1.5,  # cognitive parameter
+                'c2': 1.5,  # social parameter
+                'w': 0.7,   # inertia weight
+                'k': cpu_count(),  # number of processes
+                'p': 2,     # minkowski p-norm
+                **pso_kwargs
+            },
+            bounds=self.bounds
+        )
+
+        # Run optimization
+        best_cost, best_pos = optimizer.optimize(
+            self._objective,
+            iters=n_iterations,
+            n_processes=cpu_count(),
+            verbose=True
+        )
+
+        return PSOResults(
+            best_parameters=dict(zip(self.param_names, best_pos)),
+            best_score=best_cost,
+            position_history=optimizer.pos_history,
+            cost_history=optimizer.cost_history
+        )        
