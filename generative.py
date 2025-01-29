@@ -457,47 +457,35 @@ def process_single_flip(
     
 
 def simulate_network_evolution(
-    coordinates: FloatArray,
-    n_iterations: int,
-    distance_fn: DistanceMetric,
-    alpha: Trajectory,
-    beta: Trajectory,
-    noise: NoiseType,
-    connectivity_penalty: Trajectory,
-    sampling_rate: Trajectory = 0.1,  # New parameter
-    sampling_centers: Optional[List[Optional[int]]] = None,  # New parameter
-    initial_adjacency: Optional[FloatArray] = None,
-    sigma: float = 1.0,  # New parameter for Gaussian width
-    dask_config: Optional[DaskConfig] = None,
-    random_seed: Optional[int] = None
-) -> FloatArray:
-    """Simulate network evolution with partial sampling and spatial bias.
-    
-    Parameters
-    ----------
-    ... (existing parameters) ...
-    sampling_rate : Trajectory, optional
-        Fraction of nodes to update at each step, by default 0.1
-    sampling_centers : Optional[List[Optional[int]]], optional
-        Center nodes for spatial sampling at each step, by default None
-        If None, uniform sampling is used
-    sigma : float, optional
-        Width of Gaussian distribution for spatial sampling, by default 1.0
-    """
-    validate_parameters(
+    coordinates,
     n_iterations,
-    trajectories=(alpha, beta, noise, connectivity_penalty, sampling_rate),
-    names=('alpha', 'beta', 'noise', 'connectivity_penalty', 'sampling_rate'),
-    allow_float=(True, True, False, True, True),
-    allow_zero=(True, True, True, True, False)
-)
+    distance_fn,
+    alpha,
+    beta,
+    noise,
+    connectivity_penalty,
+    sampling_rate=0.1,
+    sampling_centers=None,
+    initial_adjacency=None,
+    sigma=1.0,
+    dask_config=None,
+    random_seed=None
+):
+    """Simulate network evolution with partial sampling and spatial bias."""
+    
+    validate_parameters(
+        n_iterations,
+        trajectories=(alpha, beta, noise, connectivity_penalty, sampling_rate),
+        names=('alpha', 'beta', 'noise', 'connectivity_penalty', 'sampling_rate'),
+        allow_float=(True, True, False, True, True),
+        allow_zero=(True, True, True, True, False)
+    )
     
     if random_seed is not None:
         np.random.seed(random_seed)
-        
+    
     n_nodes = len(coordinates)
     
-    # Initialize sampling centers if not provided
     if sampling_centers is None:
         sampling_centers = [None] * n_iterations
     elif len(sampling_centers) != n_iterations:
@@ -506,7 +494,6 @@ def simulate_network_evolution(
             f"doesn't match simulation length {n_iterations}"
         )
     
-    # Initialize adjacency matrix
     if initial_adjacency is None:
         adjacency = np.zeros((n_nodes, n_nodes), dtype=np.float64)
         idx = np.arange(n_nodes)
@@ -514,57 +501,44 @@ def simulate_network_evolution(
         adjacency[(idx + 1) % n_nodes, idx] = 1
     else:
         adjacency = initial_adjacency.copy()
-        
+    
     history = np.zeros((n_nodes, n_nodes, n_iterations))
     history[:, :, 0] = adjacency
-
-    with get_or_create_dask_client(dask_config) as client:
-        with tqdm(total=n_iterations-1, desc="Simulating network evolution") as pbar:
-            for t in range(1, n_iterations):
-                alpha_t = get_param_value(alpha, t)
-                beta_t = get_param_value(beta, t)
-                noise_t = get_param_value(noise, t) if isinstance(noise, (np.ndarray, da.Array)) else 0
-                penalty_t = get_param_value(connectivity_penalty, t)
-                rate_t = get_param_value(sampling_rate, t)
-                
-                # Sample nodes for this iteration
-                active_nodes = sample_nodes_spatially(
-                    n_nodes, coordinates, sampling_centers[t], 
-                    rate_t, sigma
-                )
-                
-                # Process sampled nodes
-                if client is not None:
-                    # Parallel processing with Dask
-                    futures = []
-                    for i in active_nodes:
-                        future = client.submit(
-                            process_node_updates,
-                            i, adjacency.copy(), coordinates, distance_fn,
-                            alpha_t, beta_t, noise_t, penalty_t
-                        )
-                        futures.append(future)
-                    results = client.gather(futures)
-                else:
-                    # Sequential processing
-                    results = []
-                    for i in active_nodes:
-                        result = process_node_updates(
-                            i, adjacency.copy(), coordinates, distance_fn,
-                            alpha_t, beta_t, noise_t, penalty_t
-                        )
-                        results.append(result)
-                
-                # Apply all updates
-                for result in results:
-                    if result['changes']:  # Only update if there were changes
-                        i = result['node']
-                        adjacency[i, :] = result['new_connections']
-                        adjacency[:, i] = result['new_connections']  # Maintain symmetry
-                
-                history[:, :, t] = adjacency
-                pbar.update(1)
+    
+    client = get_or_create_dask_client(dask_config)
+    
+    with tqdm(total=n_iterations - 1, desc="Simulating network evolution") as pbar:
+        for t in range(1, n_iterations):
+            alpha_t = get_param_value(alpha, t)
+            beta_t = get_param_value(beta, t)
+            noise_t = get_param_value(noise, t) if isinstance(noise, (np.ndarray, da.Array)) else 0
+            penalty_t = get_param_value(connectivity_penalty, t)
+            rate_t = get_param_value(sampling_rate, t)
             
+            active_nodes = sample_nodes_spatially(
+                n_nodes, coordinates, sampling_centers[t], 
+                rate_t, sigma
+            )
+            
+            futures = [
+                client.submit(
+                    process_node_updates,
+                    i, adjacency.copy(), coordinates, distance_fn,
+                    alpha_t, beta_t, noise_t, penalty_t
+                ) for i in active_nodes
+            ]
+            
+            results = client.gather(futures)
+            
+            for result in results:
+                if result['changes']:
+                    i = result['node']
+                    adjacency[i, :] = result['new_connections']
+                    adjacency[:, i] = result['new_connections']  
+            
+            history[:, :, t] = adjacency
+            pbar.update(1)
+    
     return history
 
 def process_node_updates(
