@@ -459,32 +459,42 @@ class ParallelNetworkOptimizer:
         if random_seed is not None:
             np.random.seed(random_seed)
 
+    @staticmethod
+    def _run_simulation(simulation_model, params, sim_kwargs):
+        """Run a single simulation with given parameters."""
+        return simulation_model(**params, **sim_kwargs)
+    
+    @staticmethod
+    def _evaluate_result(evaluation_function, result, eval_kwargs):
+        """Evaluate a single simulation result."""
+        score = evaluation_function(result[:, :, -1], **eval_kwargs)
+        return score["energy"] if isinstance(score, dict) else score
+    
     def _objective(self, positions: np.ndarray, client: dd.Client) -> np.ndarray:
-        """Evaluate positions using Dask."""
+        """Evaluate positions using Dask with serializable functions."""
         futures = []
         
         for pos in positions:
             params = dict(zip(self.param_names, pos))
             
-            # Submit simulation to Dask
+            # Submit simulation to Dask using static method
             future = client.submit(
+                self._run_simulation,
                 self.simulation_model,
-                **params,
-                **self.sim_kwargs
+                params,
+                self.sim_kwargs
             )
             futures.append(future)
-            
+        
         # Gather results and evaluate
         results = client.gather(futures)
-        scores = []
         
-        for result in results:
-            score = self.evaluation_function(
-                result[:, :, -1],
-                **self.eval_kwargs
-            )
-            scores.append(score["energy"] if isinstance(score, dict) else score)
-            
+        # Evaluate results using static method
+        scores = [
+            self._evaluate_result(self.evaluation_function, result, self.eval_kwargs)
+            for result in results
+        ]
+        
         return np.array(scores)
 
     def optimize(
