@@ -1,54 +1,41 @@
-
-from typing import Callable, Union, Literal, TypeAlias, Optional
+"""Network evolution simulation with Dask-based parallel processing."""
+from typing import Callable, Union, Literal, TypeAlias, Optional, Tuple
 import numpy as np
 import numba
 import numpy.typing as npt
 from numba.core.errors import TypingError
 from numba import njit, jit, NumbaError
-from joblib import Parallel, delayed
+import dask.array as da
+from dask.distributed import wait
 from tqdm import tqdm
 from scipy.spatial.distance import pdist, squareform
+
 numba.config.DISABLE_JIT_WARNINGS = 1
 
 def jit_safe(nopython=True, **jit_kwargs):
-    """
-    A safe JIT wrapper that falls back to normal Python if
-    Numba cannot compile the function in nopython mode.
-
-    Parameters
-    ----------
-    nopython : bool
-        Whether to try nopython mode first.
-    jit_kwargs : dict
-        Additional arguments passed to @jit.
-    """
+    """Safe JIT wrapper with fallback to Python."""
     def decorator(func):
         if not nopython:
-            return func  # Skip JIT entirely if nopython=False
+            return func
         
         try:
-            # Try compiling in nopython mode
             jitted = jit(nopython=True, **jit_kwargs)(func)
-            # Test compilation with dummy input if possible
-            # (you can define test cases if needed)
             return jitted
         except (TypingError, NumbaError) as e:
-            # Fallback to non-JIT version
             print(f"Numba could not compile {func.__name__}: {e}")
-            return func  # Return the original function if JIT fails
+            return func
     return decorator
 
 @njit
 def _diag_indices(n):
-    """
-    Returns the indices of the diagonal elements of an n x n matrix.
-    """
+    """Get diagonal indices."""
     rows = np.arange(n)
     cols = np.arange(n)
     return rows, cols
 
 @njit
-def _set_diagonal(matrix:np.ndarray, value:float=0.0):
+def _set_diagonal(matrix: np.ndarray, value: float = 0.0):
+    """Set diagonal elements."""
     n = matrix.shape[0]
     rows, cols = _diag_indices(n)
     for i in range(n):
@@ -57,26 +44,23 @@ def _set_diagonal(matrix:np.ndarray, value:float=0.0):
 
 @jit_safe()
 def process_matrix(matrix):
-    # Replace np.nan_to_num with a manual implementation
+    """Process matrix by handling special values."""
     n, m = matrix.shape
     result = np.empty_like(matrix)
     for i in range(n):
         for j in range(m):
             val = matrix[i, j]
-            if np.isnan(val):
-                result[i, j] = 0
-            elif val == np.inf:
-                result[i, j] = 0
-            elif val == -np.inf:
+            if np.isnan(val) or val in (np.inf, -np.inf):
                 result[i, j] = 0
             else:
                 result[i, j] = val
     return result
+
 # Type Definitions
 FloatArray = npt.NDArray[np.float64]
-Trajectory: TypeAlias = Union[float, FloatArray]
+Trajectory: TypeAlias = Union[float, FloatArray, da.Array]
 DistanceMetric = Callable[[FloatArray, FloatArray], FloatArray]
-NoiseType = Union[Literal[0], FloatArray]
+NoiseType = Union[Literal[0], FloatArray, da.Array]
 
 def validate_parameters(
     sim_length: int,
@@ -85,78 +69,50 @@ def validate_parameters(
     allow_float: tuple[bool, ...],
     allow_zero: tuple[bool, ...]
 ) -> None:
-    """
-    Validate simulation parameters.
-    
-    Args:
-        sim_length: Length of simulation
-        *trajectories: Parameter trajectories to validate
-        names: Names of parameters for error messages
-        allow_float: Whether each parameter can be float
-        allow_zero: Whether each parameter can be zero
-    
-    Raises:
-        ValueError: If any parameter is invalid
-        
-    Example:
-        >>> validate_parameters(
-        ...     1000,
-        ...     1.0, np.zeros(1000),
-        ...     names=('alpha', 'beta'),
-        ...     allow_float=(True, False),
-        ...     allow_zero=(False, True)
-        ... )
-    """
+    """Validate simulation parameters."""
     for traj, name, float_ok, zero_ok in zip(
         trajectories, names, allow_float, allow_zero
     ):
         if isinstance(traj, (float, int)):
             if not float_ok:
-                raise ValueError(
-                    f"{name} must be an array, got {type(traj)}"
-                )
+                raise ValueError(f"{name} must be an array, got {type(traj)}")
             if not zero_ok and traj == 0:
                 raise ValueError(f"{name} cannot be zero")
-        elif isinstance(traj, np.ndarray):
-            if traj.shape != (sim_length,):
+        elif isinstance(traj, (np.ndarray, da.Array)):
+            if isinstance(traj, da.Array):
+                shape = traj.shape[0]
+            else:
+                shape = traj.shape[0]
+            if shape != sim_length:
                 raise ValueError(
-                    f"{name} trajectory length {len(traj)} doesn't match "
+                    f"{name} trajectory length {shape} doesn't match "
                     f"simulation length {sim_length}"
                 )
-            if not zero_ok and np.any(traj == 0):
-                raise ValueError(f"{name} cannot contain zeros")
+            if not zero_ok:
+                if isinstance(traj, da.Array):
+                    if da.any(traj == 0).compute():
+                        raise ValueError(f"{name} cannot contain zeros")
+                else:
+                    if np.any(traj == 0):
+                        raise ValueError(f"{name} cannot contain zeros")
         else:
             raise ValueError(
                 f"{name} must be float or array, got {type(traj)}"
             )
 
-@njit
 def get_param_value(param: Trajectory, t: int) -> float:
     """Get parameter value at time t efficiently."""
-    if isinstance(param, float):
-        return param
-    return param[t]
+    if isinstance(param, (float, int)):
+        return float(param)
+    elif isinstance(param, da.Array):
+        return float(param[t].compute())
+    return float(param[t])
 
 def normalize_distances(
     coordinates: FloatArray,
     normalization: Literal["sqrt_dim", "max", "mean"] = "sqrt_dim"
 ) -> FloatArray:
-    """
-    Compute and normalize pairwise distances.
-    
-    Args:
-        coordinates: Node coordinates (n_nodes, n_dimensions)
-        normalization: Normalization method
-            - "sqrt_dim": Divide by sqrt(dimensionality)
-            - "max": Divide by maximum distance
-            - "mean": Divide by mean distance
-            
-    Returns:
-        Normalized distance matrix (n_nodes, n_nodes)
-        
-    Raises:
-        ValueError: If normalization factor is zero or method unknown
-    """
+    """Compute and normalize pairwise distances."""
     if coordinates.ndim != 2:
         raise ValueError("Coordinates must be 2D array (n_nodes, n_dimensions)")
         
@@ -178,16 +134,7 @@ def normalize_distances(
 
 @njit
 def compute_component_sizes(adjacency: FloatArray) -> FloatArray:
-    """
-    Compute size of connected component for each node efficiently.
-    Uses numba-optimized BFS to find connected components.
-    
-    Args:
-        adjacency: Adjacency matrix (n_nodes, n_nodes)
-    
-    Returns:
-        Array of component sizes (n_nodes,)
-    """
+    """Compute size of connected component for each node efficiently."""
     n_nodes = len(adjacency)
     visited = np.zeros(n_nodes, dtype=np.bool_)
     sizes = np.zeros(n_nodes, dtype=np.float64)
@@ -196,7 +143,6 @@ def compute_component_sizes(adjacency: FloatArray) -> FloatArray:
         if visited[start_node]:
             continue
             
-        # BFS from start_node
         component = np.zeros(n_nodes, dtype=np.bool_)
         queue = np.zeros(n_nodes, dtype=np.int64)
         queue_size = 1
@@ -215,7 +161,6 @@ def compute_component_sizes(adjacency: FloatArray) -> FloatArray:
                     queue[queue_size] = neighbor
                     queue_size += 1
         
-        # Update all nodes in component
         comp_size = float(queue_size)
         for i in range(queue_size):
             node = queue[i]
@@ -226,36 +171,15 @@ def compute_component_sizes(adjacency: FloatArray) -> FloatArray:
 
 @jit_safe()
 def propagation_distance(adjacency_matrix, coordinates):
-    """
-    Computes the propagation distance as:
-        - log( (I - 0.5 A)^{-1} * (I - 0.5 A)^{-1}.T )
-
-    Parameters
-    ----------
-    adjacency_matrix : np.ndarray
-        A square adjacency matrix (must be invertible for I - 0.5*A).
-    coordinates : np.ndarray
-        Not used in this computation, but kept for signature consistency.
-    
-    Returns
-    -------
-    dist : np.ndarray
-        The elementwise -log of the propagation matrix.
-    """
+    """Compute propagation distance matrix."""
     N = adjacency_matrix.shape[0]
     adjacency_matrix = adjacency_matrix.astype(np.float64)
     spectral_radius = np.max(np.abs(np.linalg.eigvals(adjacency_matrix)))
     adjacency_matrix /= spectral_radius
-    # Identity
+    
     I = np.eye(N, dtype=np.float64)
-    
-    # M = I - 0.5 * A
     M = I - 0.5 * adjacency_matrix
-    
-    # inverse_matrix = M^{-1}
     inverse_matrix = np.linalg.inv(M)
-    
-    # propagation_matrix = M^{-1} * (M^{-1})^T
     propagation_matrix = inverse_matrix @ inverse_matrix.T
     propagation_matrix = _set_diagonal(propagation_matrix, 0)
     propagation_dist = -np.log(propagation_matrix)
@@ -263,40 +187,26 @@ def propagation_distance(adjacency_matrix, coordinates):
 
 @njit
 def resistance_distance(adjacency: FloatArray, coordinates: FloatArray) -> FloatArray:
-    """
-    Compute resistance distances between all pairs of nodes.
-    
-    Args:
-        adjacency: Binary adjacency matrix (n_nodes, n_nodes)
-        coordinates: Node coordinates (n_nodes, n_dimensions)
-            Note: coordinates are used only for weighting edges
-            
-    Returns:
-        Matrix of resistance distances (n_nodes, n_nodes)
-    """
+    """Compute resistance distances between all pairs of nodes."""
     n_nodes = len(adjacency)
     distances = np.zeros((n_nodes, n_nodes))
     
-    # Compute weight matrix (1/euclidean_distance for connected nodes)
     for i in range(n_nodes):
         for j in range(i+1, n_nodes):
             if adjacency[i, j]:
                 dist = np.sqrt(np.sum((coordinates[i] - coordinates[j])**2))
-                weight = 1.0 / (dist + 1e-12)  # Avoid division by zero
+                weight = 1.0 / (dist + 1e-12)
                 distances[i, j] = weight
                 distances[j, i] = weight
                 
-    # Compute weighted Laplacian
     diag = np.sum(distances, axis=1)
     laplacian = np.diag(diag) - distances
     
-    # Compute pseudoinverse using eigendecomposition
     eigvals, eigvecs = np.linalg.eigh(laplacian)
-    mask = eigvals > 1e-10  # Filter out numerical zeros
+    mask = eigvals > 1e-10
     eigvals_inv = np.zeros_like(eigvals)
     eigvals_inv[mask] = 1.0 / eigvals[mask]
     
-    # Compute resistance distances
     L_plus = (eigvecs * eigvals_inv.reshape(1, -1)) @ eigvecs.T
     resistance = np.zeros((n_nodes, n_nodes))
     
@@ -309,43 +219,22 @@ def resistance_distance(adjacency: FloatArray, coordinates: FloatArray) -> Float
     return resistance
 
 @jit_safe()
-def shortest_path_distance(adjacency_matrix,coordinates):
-    """
-    Computes shortest-path distances between all pairs of nodes
-    using the Floyd-Warshall algorithm.
-
-    Parameters
-    ----------
-    adjacency_matrix : np.ndarray
-        A square adjacency matrix where entry (i, j) represents
-        the weight of the edge from node i to j. Use np.inf for no direct edge.
-
-    Returns
-    -------
-    dist_matrix : np.ndarray
-        A square matrix where entry (i, j) represents the shortest path
-        distance from node i to j.
-    """
+def shortest_path_distance(adjacency_matrix, coordinates):
+    """Compute shortest-path distances using Floyd-Warshall algorithm."""
     N = adjacency_matrix.shape[0]
-    
-    # Create distance matrix as a copy of the adjacency matrix
     dist_matrix = adjacency_matrix.astype(np.float64)
     
-    # Convert zero entries (non-diagonal) to np.inf (no connection)
     for i in range(N):
         for j in range(N):
             if i != j and dist_matrix[i, j] == 0:
                 dist_matrix[i, j] = np.inf
     
-    # Ensure diagonal is 0 (distance from a node to itself)
     for i in range(N):
         dist_matrix[i, i] = 0.0
 
-    # Floyd-Warshall algorithm
-    for k in range(N):  # Intermediate node
-        for i in range(N):  # Source node
-            for j in range(N):  # Destination node
-                # Relax the distance via intermediate node k
+    for k in range(N):
+        for i in range(N):
+            for j in range(N):
                 dist_matrix[i, j] = min(
                     dist_matrix[i, j],
                     dist_matrix[i, k] + dist_matrix[k, j]
@@ -353,33 +242,14 @@ def shortest_path_distance(adjacency_matrix,coordinates):
 
     return dist_matrix
 
-
 @jit_safe()
 def search_information(W, coordinates):
-    """
-    Calculate search information for a memoryless random walker.
-
-    Parameters
-    ----------
-    W : (N, N) ndarray
-        Weighted/unweighted, directed/undirected connection weight matrix.
-    coordinates : (N, 2) ndarray
-        Coordinates of nodes (n_nodes, n_dimensions).
-
-    Returns
-    -------
-    SI : (N, N) ndarray
-        Pairwise search information matrix. The diagonal is set to 0.
-        Edges without a valid shortest path are set to np.inf.
-    """
+    """Calculate search information for a memoryless random walker."""
     N = W.shape[0]
-
-    # Normalize weights to transition probabilities
     T = W / np.sum(W, axis=1)[:, None]
-
-    # Precompute shortest path distances using Floyd-Warshall algorithm
+    
     dist_matrix = W.astype(np.float64)
-    p_mat = np.zeros((N, N), dtype=np.int32) - 1  # Predecessor matrix
+    p_mat = np.zeros((N, N), dtype=np.int32) - 1
 
     for i in range(N):
         for j in range(N):
@@ -388,24 +258,21 @@ def search_information(W, coordinates):
             else:
                 p_mat[i, j] = i
 
-    for k in range(N):  # Intermediate node
-        for i in range(N):  # Source node
-            for j in range(N):  # Destination node
+    for k in range(N):
+        for i in range(N):
+            for j in range(N):
                 if dist_matrix[i, k] + dist_matrix[k, j] < dist_matrix[i, j]:
                     dist_matrix[i, j] = dist_matrix[i, k] + dist_matrix[k, j]
                     p_mat[i, j] = p_mat[k, j]
 
-    # Initialize search information matrix
     SI = np.full((N, N), np.inf)
 
-    # Compute search information
     for i in range(N):
         for j in range(N):
             if i == j:
                 SI[i, j] = 0.0
                 continue
 
-            # Retrieve shortest path from predecessor matrix
             path = []
             current = j
             while current != -1 and current != i:
@@ -415,9 +282,8 @@ def search_information(W, coordinates):
                 path.append(i)
                 path.reverse()
             else:
-                continue  # No valid path
+                continue
 
-            # Compute search information along the shortest path
             product = 1.0
             for k in range(len(path) - 1):
                 product *= T[path[k], path[k + 1]]
@@ -436,42 +302,22 @@ def compute_node_payoff(
     noise: float,
     connectivity_penalty: float,
 ) -> float:
-    """
-    Compute payoff for a single node.
-    
-    Args:
-        node: Index of node
-        adjacency: Current adjacency matrix
-        coordinates: Node coordinates
-        distance_fn: Function computing distance metric
-        alpha: Weight of distance term
-        beta: Weight of wiring cost
-        noise: Noise value (0 for deterministic)
-        connectivity_penalty: Penalty for disconnected components
-        skip_connectivity: Whether to skip connectivity computation
-        
-    Returns:
-        Total payoff value
-    """
+    """Compute payoff for a single node."""
     n_nodes = len(adjacency)
     payoff = 0.0
     
-    # Distance term
     if alpha != 0:
         distances = distance_fn(adjacency, coordinates)
         payoff -= alpha * np.sum(distances[node])
         
-    # Wiring cost
     if beta != 0:
         euclidean = np.sqrt(np.sum((coordinates[node] - coordinates)**2, axis=1))
         payoff -= beta * np.sum(adjacency[node] * euclidean)
         
-    # Connectivity penalty
     if connectivity_penalty != 0:
         comp_sizes = compute_component_sizes(adjacency)
         payoff -= connectivity_penalty * (n_nodes - comp_sizes[node])
         
-    # Add noise
     if noise != 0:
         payoff += noise
         
@@ -490,26 +336,7 @@ def simulate_network_evolution(
     batch_size: int = 32,
     random_seed: Optional[int] = None
 ) -> FloatArray:
-    """
-    Simulate network evolution through payoff optimization.
-    
-    Args:
-        coordinates: Node coordinates (n_nodes, n_dimensions)
-        n_iterations: Number of simulation steps
-        distance_fn: Function computing distance metric
-        alpha: Weight of distance term (float or array)
-        beta: Weight of wiring cost (float or array)
-        noise: Noise values (0 or array)
-        connectivity_penalty: Penalty for disconnected components
-        initial_adjacency: Starting adjacency matrix (optional)
-        n_jobs: Number of parallel jobs (-1 for all cores)
-        batch_size: Number of edge flips to process in parallel
-        random_seed: Random seed for reproducibility
-        
-    Returns:
-        History of adjacency matrices (n_nodes, n_nodes, n_iterations)
-    """
-    # Parameter validation
+    """Simulate network evolution through payoff optimization."""
     validate_parameters(
         n_iterations,
         alpha, beta, noise, connectivity_penalty,
@@ -523,9 +350,7 @@ def simulate_network_evolution(
         
     n_nodes = len(coordinates)
     
-    # Initialize adjacency if not provided
     if initial_adjacency is None:
-        # Start with ring structure
         adjacency = np.zeros((n_nodes, n_nodes), dtype=np.float64)
         idx = np.arange(n_nodes)
         adjacency[idx, (idx + 1) % n_nodes] = 1
@@ -533,37 +358,30 @@ def simulate_network_evolution(
     else:
         adjacency = initial_adjacency.copy()
         
-    # Pre-allocate history
     history = np.zeros((n_nodes, n_nodes, n_iterations))
     history[:, :, 0] = adjacency
     
-    # Simulation loop with progress bar
     with tqdm(total=n_iterations-1, desc="Simulating network evolution") as pbar:
         for t in range(1, n_iterations):
-            # Get current parameters
             alpha_t = get_param_value(alpha, t)
             beta_t = get_param_value(beta, t)
-            noise_t = get_param_value(noise, t) if isinstance(noise, np.ndarray) else 0
+            noise_t = get_param_value(noise, t) if isinstance(noise, (np.ndarray, da.Array)) else 0
             penalty_t = get_param_value(connectivity_penalty, t)
             
-            # Process edge flips in parallel batches
             def process_flip(_):
                 i, j = np.random.randint(0, n_nodes, size=2)
                 if i == j:
                     return None
                     
-                # Compute current payoff
                 current = compute_node_payoff(
                     i, adjacency, coordinates, distance_fn,
                     alpha_t, beta_t, noise_t, penalty_t,
                 )
                 
-                # Test flip
                 adj_test = adjacency.copy()
                 adj_test[i, j] = 1 - adj_test[i, j]
                 adj_test[j, i] = adj_test[i, j]
                 
-                # Compute new payoff
                 new = compute_node_payoff(
                     i, adj_test, coordinates, distance_fn,
                     alpha_t, beta_t, noise_t, penalty_t,
@@ -573,14 +391,14 @@ def simulate_network_evolution(
                     'i': i, 'j': j,
                     'accepted': new > current
                 }
-                
-            # Process batch in parallel
-            n_flips = batch_size
-            results = Parallel(n_jobs=n_jobs)(
-                delayed(process_flip)(i) for i in range(n_flips)
-            )
             
-            # Apply accepted flips
+            # Process batch using Dask delayed
+            futures = [
+                da.delayed(process_flip)(i)
+                for i in range(batch_size)
+            ]
+            results = da.compute(*futures)
+            
             for result in results:
                 if result is not None and result['accepted']:
                     i, j = result['i'], result['j']
