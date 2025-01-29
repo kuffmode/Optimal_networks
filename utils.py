@@ -1,17 +1,12 @@
 """Utility functions for network analysis and optimization."""
-from typing import List, Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any
 import numpy as np
 import networkx as nx
 from dataclasses import dataclass
-import dask.distributed as dd
-import dask.array as da
 from scipy.stats import ks_2samp
 from numba import njit
 import warnings
 from functools import lru_cache
-from skopt import gp_minimize
-from skopt.space import Real
-from skopt.utils import use_named_args
 from dask_config import DaskConfig, get_or_create_dask_client
 from tqdm import tqdm
 
@@ -189,167 +184,7 @@ def density_distance(final_network, empirical):
     density_empirical = np.sum(empirical) / (empirical.shape[0] * empirical.shape[0])
     return abs(density_synthetic - density_empirical)
 
-@dataclass
-class OptimizationResults:
-    """Container for optimization results."""
-    best_parameters: Dict[str, float]
-    best_score: float
-    all_parameters: List[Dict[str, float]]
-    all_scores: List[float]
-    convergence_info: Dict[str, Any]
 
-class NetworkOptimizer:
-    """Optimizer for network evolution parameters using Dask-based parallel processing."""
-    
-    def __init__(
-        self,
-        coordinates: np.ndarray,
-        empirical_network: np.ndarray,
-        distance_fn: Callable,
-        n_iterations: int = 1000,
-        evaluator: Optional[Callable] = None,
-        dask_config: Optional[DaskConfig] = None,
-        evaluator_kwargs: Optional[Dict[str, Any]] = None,
-        random_seed: Optional[int] = None
-    ):
-        """Initialize the optimizer with Dask support."""
-        self.coordinates = coordinates
-        self.empirical_network = empirical_network
-        self.n_iterations = n_iterations
-        self.dask_config = dask_config or DaskConfig()
-        self.random_seed = random_seed
-        self.distance_fn = distance_fn
-        self.evaluator_kwargs = evaluator_kwargs if evaluator_kwargs else {}
-        
-        self.evaluator = evaluator if evaluator else density_distance
-        self.euclidean_distance = self._compute_euclidean_distances()
-        
-    def _compute_euclidean_distances(self) -> np.ndarray:
-        """Compute euclidean distances once."""
-        from scipy.spatial.distance import pdist, squareform
-        return squareform(pdist(self.coordinates))
-        
-    def _create_parameter_space(
-        self,
-        param_ranges: Dict[str, tuple]
-    ) -> List[Real]:
-        """Create skopt parameter space from ranges."""
-        return [
-            Real(low, high, name=name)
-            for name, (low, high) in param_ranges.items()
-        ]
-        
-    def _simulate_with_params(
-        self,
-        params: Dict[str, float],
-        client: dd.Client,
-        batch_id: Optional[int] = None
-    ) -> float:
-        """Run simulation with given parameters using Dask."""
-        # Create parameter trajectories
-        alpha = params.get('alpha', np.full(self.n_iterations, 1.0))
-        beta = params.get('beta', np.full(self.n_iterations, 0.1))
-        noise = params.get('noise', np.zeros(self.n_iterations))
-        penalty = params.get('connectivity_penalty', np.zeros(self.n_iterations))
-        
-        if 'beta_growth' in params:
-            beta = np.linspace(0, beta, self.n_iterations)
-        if 'noise_std' in params:
-            noise = np.random.normal(0, params['noise_std'], self.n_iterations)
-            
-        # Convert arrays to Dask arrays for distributed computing
-        alpha_da = da.from_array(alpha, chunks='auto')
-        beta_da = da.from_array(beta, chunks='auto')
-        noise_da = da.from_array(noise, chunks='auto')
-        penalty_da = da.from_array(penalty, chunks='auto')
-        
-        # Run simulation with Dask
-        history = simulate_network_evolution(
-            coordinates=self.coordinates,
-            n_iterations=self.n_iterations,
-            distance_fn=self.distance_fn,
-            alpha=alpha_da,
-            beta=beta_da,
-            noise=noise_da,
-            connectivity_penalty=penalty_da,
-            n_jobs=self.dask_config.n_workers[0],  # Use simulation workers
-            random_seed=self.random_seed + batch_id if batch_id is not None else None
-        )
-        
-        # Evaluate final network
-        final_network = history[:, :, -1]
-        score = self.evaluator(
-            final_network,
-            self.empirical_network,
-            self.euclidean_distance,
-            **self.evaluator_kwargs
-        )
-        
-        return score
-        
-    def optimize(
-        self,
-        param_ranges: Dict[str, tuple],
-        n_calls: int = 50,
-        n_initial_points: int = 10,
-        n_parallel_samples: int = 16,
-        acquisition_function: str = "gp_hedge",
-        verbose: bool = True
-    ) -> OptimizationResults:
-        """Run Bayesian optimization with Dask-based parallel processing."""
-        space = self._create_parameter_space(param_ranges)
-        
-        with dask_cluster(self.dask_config) as client:
-            # Define objective function outside of decorator for better pickling
-            def run_objective(params_dict):
-                futures = [
-                    client.submit(
-                        self._simulate_with_params,
-                        params_dict,
-                        client,
-                        i
-                    )
-                    for i in range(n_parallel_samples)
-                ]
-                scores = client.gather(futures)
-                return np.mean([score["energy"] if isinstance(score, dict) else score 
-                              for score in scores])
-            
-            # Wrap with decorator for skopt compatibility
-            @use_named_args(space)
-            def objective(**params):
-                return run_objective(params)
-            
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore")
-                
-                if verbose:
-                    print(f"Running Bayesian optimization with Dask ({self.dask_config.cluster_type} cluster)")
-                    
-                result = gp_minimize(
-                    func=objective,
-                    dimensions=space,
-                    n_calls=n_calls,
-                    n_initial_points=n_initial_points,
-                    acq_func=acquisition_function,
-                    random_state=self.random_seed
-                )
-        
-        param_names = list(param_ranges.keys())
-        best_params = dict(zip(param_names, result.x))
-        all_params = [dict(zip(param_names, x)) for x in result.x_iters]
-        
-        return OptimizationResults(
-            best_parameters=best_params,
-            best_score=result.fun,
-            all_parameters=all_params,
-            all_scores=result.func_vals,
-            convergence_info={
-                'models': result.models,
-                'space': result.space,
-                'specs': result.specs
-            }
-        )
 @dataclass
 class PSOResults:
     """Container for PSO optimization results."""
@@ -381,33 +216,40 @@ class ParallelNetworkOptimizer:
             np.array([b[0] for b in param_bounds.values()]),
             np.array([b[1] for b in param_bounds.values()])
         )
-        self.dask_config = dask_config
+        self.dask_config = dask_config or DaskConfig()
         
         if random_seed is not None:
             np.random.seed(random_seed)
 
     def _run_single_simulation(self, params: Dict[str, float]) -> float:
-        """Run a single simulation with given parameters."""
-        result = self.simulation_model(**params, **self.sim_kwargs)
-        score = self.evaluation_function(result[:, :, -1], **self.eval_kwargs)
-        return score["energy"] if isinstance(score, dict) else score
+        # Disable Dask client creation inside simulations
+        full_params = self.sim_kwargs.copy()
+        full_params.update(params)
+        full_params["dask_config"] = None  # Prevent nested client creation
+        
+        # Convert scalar parameters to full trajectories
+        for param in self.param_names:
+            if isinstance(full_params[param], (int, float)):
+                full_params[param] = np.full(
+                    self.sim_kwargs['n_iterations'], 
+                    full_params[param]
+                )
+        
+        # Run simulation
+        history = self.simulation_model(**full_params)
+        return self.evaluation_function(history[:, :, -1], **self.eval_kwargs)
 
     def optimize(
-        self,
-        n_particles: int = 20,
-        n_iterations: int = 50,
-        pso_options: Dict[str, float] = None
-    ) -> PSOResults:
-        """Run PSO optimization with Dask-based parallel processing."""
-        options = {
-            'c1': 1.5,  # Cognitive parameter
-            'c2': 1.5,  # Social parameter
-            'w': 0.7    # Inertia weight
-        }
+    self,
+    n_particles: int = 20,
+    n_iterations: int = 50,
+    pso_options: Dict[str, float] = None
+) -> PSOResults:
+        """Run PSO optimization with proper Dask client handling."""
+        options = {'c1': 1.5, 'c2': 1.5, 'w': 0.7}
         if pso_options:
             options.update(pso_options)
 
-        # Initialize particles
         dimensions = len(self.param_names)
         positions = np.random.uniform(
             low=self.bounds[0], 
@@ -420,54 +262,54 @@ class ParallelNetworkOptimizer:
             size=(n_particles, dimensions)
         )
         
-        # Initialize best positions and scores
         pbest_positions = positions.copy()
+        pbest_scores = np.full(n_particles, np.inf)
         position_history = []
         all_scores = []
         
-        with get_or_create_dask_client(self.dask_config) as client:
-            # Evaluate initial positions
-            print(f"\nRunning initial evaluation for {n_particles} particles...")
-            futures = []
-            for pos in positions:
-                params = dict(zip(self.param_names, pos))
-                if client is not None:
-                    futures.append(client.submit(self._run_single_simulation, params))
-                else:
-                    futures.append(self._run_single_simulation(params))
-            
-            scores = np.array(client.gather(futures) if client else futures)
-            pbest_scores = scores.copy()
-            gbest_score_idx = np.argmin(scores)
-            gbest_position = positions[gbest_score_idx].copy()
-            gbest_score = scores[gbest_score_idx]
-            
-            # Main optimization loop
-            print(f"\nRunning {n_iterations} optimization iterations...")
-            for iteration in tqdm(range(n_iterations), desc=f"PSO iterations (using {n_particles} particles)"):
-                # Update velocities and positions
+        # Get existing client once before loop
+        client = get_or_create_dask_client(self.dask_config)
+        
+        # Initial evaluation
+        futures = [client.submit(
+            self._run_single_simulation,
+            dict(zip(self.param_names, pos))
+        ) for pos in positions]
+        scores = np.array(client.gather(futures))
+        
+        pbest_scores = scores.copy()
+        gbest_idx = np.argmin(scores)
+        gbest_position = positions[gbest_idx].copy()
+        gbest_score = scores[gbest_idx]
+        
+        # Optimization loop
+        with tqdm(total=n_iterations, desc=f"PSO (n_particles={n_particles})") as pbar:
+            for iteration in range(n_iterations):
                 r1, r2 = np.random.rand(2)
-                cognitive = options['c1'] * r1 * (pbest_positions - positions)
-                social = options['c2'] * r2 * (gbest_position - positions)
-                velocities = options['w'] * velocities + cognitive + social
-                positions = np.clip(positions + velocities, self.bounds[0], self.bounds[1])
+                velocities = (
+                    options['w'] * velocities +
+                    options['c1'] * r1 * (pbest_positions - positions) +
+                    options['c2'] * r2 * (gbest_position - positions)
+                )
+                positions = np.clip(
+                    positions + velocities,
+                    self.bounds[0],
+                    self.bounds[1]
+                )
                 
                 # Evaluate new positions
-                futures = []
-                for pos in positions:
-                    params = dict(zip(self.param_names, pos))
-                    if client is not None:
-                        futures.append(client.submit(self._run_single_simulation, params))
-                    else:
-                        futures.append(self._run_single_simulation(params))
+                futures = [client.submit(
+                    self._run_single_simulation,
+                    dict(zip(self.param_names, pos))
+                ) for pos in positions]
+                scores = np.array(client.gather(futures))
                 
-                scores = np.array(client.gather(futures) if client else futures)
-                
-                # Update personal and global best
+                # Update personal best
                 improved = scores < pbest_scores
                 pbest_positions[improved] = positions[improved]
                 pbest_scores[improved] = scores[improved]
                 
+                # Update global best
                 current_best_idx = np.argmin(scores)
                 if scores[current_best_idx] < gbest_score:
                     gbest_position = positions[current_best_idx].copy()
@@ -476,8 +318,10 @@ class ParallelNetworkOptimizer:
                 # Store history
                 position_history.append(positions.copy())
                 all_scores.append(scores.copy())
+                pbar.update(1)
                 
-                print(f"Iteration {iteration + 1}/{n_iterations}: Best score = {gbest_score:.6f}")
+                # Optional: Add progress bar description
+                pbar.set_postfix({"best_score": gbest_score})
 
         return PSOResults(
             best_parameters=dict(zip(self.param_names, gbest_position)),
