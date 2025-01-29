@@ -1,14 +1,14 @@
 """Network evolution simulation with Dask-based parallel processing."""
-from typing import Callable, Union, Literal, TypeAlias, Optional, Tuple
+from typing import Any, Callable, Dict, Union, Literal, TypeAlias, Optional, Tuple, List
 import numpy as np
 import numba
 import numpy.typing as npt
 from numba.core.errors import TypingError
 from numba import njit, jit, NumbaError
 import dask.array as da
-from dask.distributed import wait
 from tqdm import tqdm
 from scipy.spatial.distance import pdist, squareform
+from dask_config import DaskConfig, get_or_create_dask_client
 
 numba.config.DISABLE_JIT_WARNINGS = 1
 
@@ -56,7 +56,78 @@ def process_matrix(matrix):
                 result[i, j] = val
     return result
 
-# Type Definitions
+@njit
+def sample_nodes_spatially(
+    n_nodes: int,
+    coordinates: npt.NDArray[np.float64],
+    center_node: Optional[int],
+    sampling_rate: float,
+    sigma: float = 1.0
+) -> np.ndarray:
+    """Sample nodes based on spatial proximity to a center node.
+    
+    Parameters
+    ----------
+    n_nodes : int
+        Total number of nodes
+    coordinates : npt.NDArray[np.float64]
+        Node coordinates array
+    center_node : Optional[int]
+        Center node for spatial sampling (None for uniform)
+    sampling_rate : float
+        Fraction of nodes to sample
+    sigma : float
+        Standard deviation for Gaussian sampling
+        
+    Returns
+    -------
+    np.ndarray
+        Indices of sampled nodes
+    """
+    n_samples = max(1, int(n_nodes * sampling_rate))
+    
+    if center_node is None or center_node < 0:  # Handle None case in numba
+        # Uniform sampling
+        indices = np.arange(n_nodes)
+        np.random.shuffle(indices)
+        return indices[:n_samples]
+    
+    # Compute distances from center node
+    distances = np.zeros(n_nodes)
+    for i in range(n_nodes):
+        distances[i] = np.sqrt(
+            np.sum((coordinates[i] - coordinates[center_node])**2)
+        )
+    
+    # Compute Gaussian probabilities
+    probs = np.exp(-0.5 * (distances / sigma)**2)
+    probs[center_node] = 0  # Exclude center node
+    probs = probs / np.sum(probs)  # Normalize
+    
+    # Sample using probabilities
+    sampled = np.zeros(n_samples, dtype=np.int64)
+    available = np.ones(n_nodes, dtype=np.bool_)
+    
+    for i in range(n_samples):
+        # Normalize remaining probabilities
+        remaining_probs = probs * available
+        if np.sum(remaining_probs) == 0:
+            # If no valid probabilities left, sample uniformly from remaining nodes
+            remaining_indices = np.where(available)[0]
+            idx = remaining_indices[
+                np.random.randint(0, len(remaining_indices))
+            ]
+        else:
+            remaining_probs = remaining_probs / np.sum(remaining_probs)
+            # Sample one index
+            cumsum = np.cumsum(remaining_probs)
+            idx = np.searchsorted(cumsum, np.random.random())
+            
+        sampled[i] = idx
+        available[idx] = False
+        
+    return sampled
+
 FloatArray = npt.NDArray[np.float64]
 Trajectory: TypeAlias = Union[float, FloatArray, da.Array]
 DistanceMetric = Callable[[FloatArray, FloatArray], FloatArray]
@@ -64,15 +135,13 @@ NoiseType = Union[Literal[0], FloatArray, da.Array]
 
 def validate_parameters(
     sim_length: int,
-    *trajectories: Trajectory,
+    trajectories: tuple[Trajectory, ...],
     names: tuple[str, ...],
     allow_float: tuple[bool, ...],
     allow_zero: tuple[bool, ...]
 ) -> None:
     """Validate simulation parameters."""
-    for traj, name, float_ok, zero_ok in zip(
-        trajectories, names, allow_float, allow_zero
-    ):
+    for traj, name, float_ok, zero_ok in zip(trajectories, names, allow_float, allow_zero):
         if isinstance(traj, (float, int)):
             if not float_ok:
                 raise ValueError(f"{name} must be an array, got {type(traj)}")
@@ -96,9 +165,7 @@ def validate_parameters(
                     if np.any(traj == 0):
                         raise ValueError(f"{name} cannot contain zeros")
         else:
-            raise ValueError(
-                f"{name} must be float or array, got {type(traj)}"
-            )
+            raise ValueError(f"{name} must be float or array, got {type(traj)}")
 
 def get_param_value(param: Trajectory, t: int) -> float:
     """Get parameter value at time t efficiently."""
@@ -323,6 +390,72 @@ def compute_node_payoff(
         
     return payoff
 
+def process_single_flip(
+    adjacency: FloatArray,
+    coordinates: FloatArray,
+    distance_fn: DistanceMetric,
+    alpha_t: float,
+    beta_t: float,
+    noise_t: float,
+    penalty_t: float
+) -> Optional[Dict[str, Any]]:
+    """Process a single edge flip in the network.
+    
+    Parameters
+    ----------
+    adjacency : FloatArray
+        Current adjacency matrix
+    coordinates : FloatArray
+        Node coordinates
+    distance_fn : DistanceMetric
+        Function to compute distances (e.g., resistance_distance)
+    alpha_t : float
+        Current alpha parameter value
+    beta_t : float
+        Current beta parameter value
+    noise_t : float
+        Current noise parameter value
+    penalty_t : float
+        Current connectivity penalty value
+        
+    Returns
+    -------
+    Optional[Dict[str, Any]]
+        None if flip involves same node, otherwise dictionary with:
+        - 'i': first node index
+        - 'j': second node index
+        - 'accepted': whether flip was accepted
+    """
+    n_nodes = len(adjacency)
+    i, j = np.random.randint(0, n_nodes, size=2)
+    
+    if i == j:
+        return None
+        
+    # Compute current payoff
+    current_payoff = compute_node_payoff(
+        i, adjacency, coordinates, distance_fn,
+        alpha_t, beta_t, noise_t, penalty_t
+    )
+    
+    # Test flip
+    adj_test = adjacency.copy()
+    adj_test[i, j] = 1 - adj_test[i, j]
+    adj_test[j, i] = adj_test[i, j]  # Maintain symmetry
+    
+    # Compute new payoff
+    new_payoff = compute_node_payoff(
+        i, adj_test, coordinates, distance_fn,
+        alpha_t, beta_t, noise_t, penalty_t
+    )
+    
+    return {
+        'i': i,
+        'j': j,
+        'accepted': new_payoff > current_payoff
+    }
+    
+
 def simulate_network_evolution(
     coordinates: FloatArray,
     n_iterations: int,
@@ -331,25 +464,49 @@ def simulate_network_evolution(
     beta: Trajectory,
     noise: NoiseType,
     connectivity_penalty: Trajectory,
+    sampling_rate: Trajectory = 0.1,  # New parameter
+    sampling_centers: Optional[List[Optional[int]]] = None,  # New parameter
     initial_adjacency: Optional[FloatArray] = None,
-    n_jobs: int = -1,
-    batch_size: int = 32,
+    sigma: float = 1.0,  # New parameter for Gaussian width
+    dask_config: Optional[DaskConfig] = None,
     random_seed: Optional[int] = None
 ) -> FloatArray:
-    """Simulate network evolution through payoff optimization."""
+    """Simulate network evolution with partial sampling and spatial bias.
+    
+    Parameters
+    ----------
+    ... (existing parameters) ...
+    sampling_rate : Trajectory, optional
+        Fraction of nodes to update at each step, by default 0.1
+    sampling_centers : Optional[List[Optional[int]]], optional
+        Center nodes for spatial sampling at each step, by default None
+        If None, uniform sampling is used
+    sigma : float, optional
+        Width of Gaussian distribution for spatial sampling, by default 1.0
+    """
     validate_parameters(
-        n_iterations,
-        alpha, beta, noise, connectivity_penalty,
-        names=('alpha', 'beta', 'noise', 'connectivity_penalty'),
-        allow_float=(True, True, False, True),
-        allow_zero=(True, True, True, True)
-    )
+    n_iterations,
+    trajectories=(alpha, beta, noise, connectivity_penalty, sampling_rate),
+    names=('alpha', 'beta', 'noise', 'connectivity_penalty', 'sampling_rate'),
+    allow_float=(True, True, False, True, True),
+    allow_zero=(True, True, True, True, False)
+)
     
     if random_seed is not None:
         np.random.seed(random_seed)
         
     n_nodes = len(coordinates)
     
+    # Initialize sampling centers if not provided
+    if sampling_centers is None:
+        sampling_centers = [None] * n_iterations
+    elif len(sampling_centers) != n_iterations:
+        raise ValueError(
+            f"sampling_centers length {len(sampling_centers)} "
+            f"doesn't match simulation length {n_iterations}"
+        )
+    
+    # Initialize adjacency matrix
     if initial_adjacency is None:
         adjacency = np.zeros((n_nodes, n_nodes), dtype=np.float64)
         idx = np.arange(n_nodes)
@@ -360,52 +517,107 @@ def simulate_network_evolution(
         
     history = np.zeros((n_nodes, n_nodes, n_iterations))
     history[:, :, 0] = adjacency
-    
-    with tqdm(total=n_iterations-1, desc="Simulating network evolution") as pbar:
-        for t in range(1, n_iterations):
-            alpha_t = get_param_value(alpha, t)
-            beta_t = get_param_value(beta, t)
-            noise_t = get_param_value(noise, t) if isinstance(noise, (np.ndarray, da.Array)) else 0
-            penalty_t = get_param_value(connectivity_penalty, t)
-            
-            def process_flip(_):
-                i, j = np.random.randint(0, n_nodes, size=2)
-                if i == j:
-                    return None
-                    
-                current = compute_node_payoff(
-                    i, adjacency, coordinates, distance_fn,
-                    alpha_t, beta_t, noise_t, penalty_t,
+
+    with get_or_create_dask_client(dask_config) as client:
+        with tqdm(total=n_iterations-1, desc="Simulating network evolution") as pbar:
+            for t in range(1, n_iterations):
+                alpha_t = get_param_value(alpha, t)
+                beta_t = get_param_value(beta, t)
+                noise_t = get_param_value(noise, t) if isinstance(noise, (np.ndarray, da.Array)) else 0
+                penalty_t = get_param_value(connectivity_penalty, t)
+                rate_t = get_param_value(sampling_rate, t)
+                
+                # Sample nodes for this iteration
+                active_nodes = sample_nodes_spatially(
+                    n_nodes, coordinates, sampling_centers[t], 
+                    rate_t, sigma
                 )
                 
-                adj_test = adjacency.copy()
-                adj_test[i, j] = 1 - adj_test[i, j]
-                adj_test[j, i] = adj_test[i, j]
+                # Process sampled nodes
+                if client is not None:
+                    # Parallel processing with Dask
+                    futures = []
+                    for i in active_nodes:
+                        future = client.submit(
+                            process_node_updates,
+                            i, adjacency.copy(), coordinates, distance_fn,
+                            alpha_t, beta_t, noise_t, penalty_t
+                        )
+                        futures.append(future)
+                    results = client.gather(futures)
+                else:
+                    # Sequential processing
+                    results = []
+                    for i in active_nodes:
+                        result = process_node_updates(
+                            i, adjacency.copy(), coordinates, distance_fn,
+                            alpha_t, beta_t, noise_t, penalty_t
+                        )
+                        results.append(result)
                 
-                new = compute_node_payoff(
-                    i, adj_test, coordinates, distance_fn,
-                    alpha_t, beta_t, noise_t, penalty_t,
-                )
+                # Apply all updates
+                for result in results:
+                    if result['changes']:  # Only update if there were changes
+                        i = result['node']
+                        adjacency[i, :] = result['new_connections']
+                        adjacency[:, i] = result['new_connections']  # Maintain symmetry
                 
-                return {
-                    'i': i, 'j': j,
-                    'accepted': new > current
-                }
-            
-            # Process batch using Dask delayed
-            futures = [
-                da.delayed(process_flip)(i)
-                for i in range(batch_size)
-            ]
-            results = da.compute(*futures)
-            
-            for result in results:
-                if result is not None and result['accepted']:
-                    i, j = result['i'], result['j']
-                    adjacency[i, j] = 1 - adjacency[i, j]
-                    adjacency[j, i] = adjacency[i, j]
-                    
-            history[:, :, t] = adjacency
-            pbar.update(1)
+                history[:, :, t] = adjacency
+                pbar.update(1)
             
     return history
+
+def process_node_updates(
+    node: int,
+    adjacency: FloatArray,
+    coordinates: FloatArray,
+    distance_fn: DistanceMetric,
+    alpha_t: float,
+    beta_t: float,
+    noise_t: float,
+    penalty_t: float
+) -> Dict[str, Any]:
+    """Process all possible edge updates for a single node.
+    
+    For each possible connection, tests if adding/removing it improves the node's payoff.
+    Returns the best configuration found.
+    """
+    n_nodes = len(adjacency)
+    best_payoff = compute_node_payoff(
+        node, adjacency, coordinates, distance_fn,
+        alpha_t, beta_t, noise_t, penalty_t
+    )
+    best_connections = adjacency[node, :].copy()
+    made_changes = False
+    
+    # Try flipping each possible connection
+    for other in range(n_nodes):
+        if other == node:
+            continue
+            
+        # Test flipping this connection
+        test_connections = best_connections.copy()
+        test_connections[other] = 1 - test_connections[other]
+        
+        # Create test adjacency matrix
+        adj_test = adjacency.copy()
+        adj_test[node, :] = test_connections
+        adj_test[:, node] = test_connections  # Maintain symmetry
+        
+        # Compute new payoff
+        new_payoff = compute_node_payoff(
+            node, adj_test, coordinates, distance_fn,
+            alpha_t, beta_t, noise_t, penalty_t
+        )
+        
+        # Update if better
+        if new_payoff > best_payoff:
+            best_payoff = new_payoff
+            best_connections = test_connections
+            made_changes = True
+    
+    return {
+        'node': node,
+        'new_connections': best_connections,
+        'changes': made_changes
+    }
