@@ -13,7 +13,6 @@ from dataclasses import dataclass
 from joblib import Parallel, delayed
 from tqdm import tqdm
 import warnings
-from generative import simulate_network_evolution, resistance_distance
 
 def evaluator(synthetic, empirical, euclidean_distance):
     degrees_synthetic = np.sum(synthetic, axis=0)
