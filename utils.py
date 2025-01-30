@@ -14,8 +14,6 @@ from joblib import Parallel, delayed
 from tqdm import tqdm
 import warnings
 from generative import simulate_network_evolution, resistance_distance
-from pyswarms.single.global_best import GlobalBestPSO
-from multiprocessing import cpu_count
 
 def evaluator(synthetic, empirical, euclidean_distance):
     degrees_synthetic = np.sum(synthetic, axis=0)
@@ -236,49 +234,40 @@ class OptimizationResults:
 class NetworkOptimizer:
     """
     Optimizer for network evolution parameters using Bayesian optimization.
+    
+    This class provides a flexible framework for optimizing network evolution parameters
+    by allowing injection of custom simulation models and evaluation functions.
     """
     
     def __init__(
         self,
-        coordinates: FloatArray,
-        empirical_network: FloatArray,
-        n_iterations: int = 1000,
-        evaluator: Optional[Callable] = None,
+        simulation_model: Callable,
+        evaluation_function: Callable,
+        param_ranges: Dict[str, tuple],
+        sim_kwargs: Dict[str, Any],
+        eval_kwargs: Dict[str, Any],
         n_parallel: int = -1,
-        distance_fn: Optional[Callable] = resistance_distance,
-        evaluator_kwargs: Optional[Dict[str, Any]] = None,
         random_seed: Optional[int] = None
     ):
         """
         Initialize the optimizer.
         
         Args:
-            coordinates: Node coordinates (n_nodes, n_dimensions)
-            empirical_network: Target network to match
-            n_iterations: Number of iterations for each simulation
-            evaluator: Custom evaluation function (defaults to density distance)
+            simulation_model: Function that simulates network evolution
+            evaluation_function: Function that evaluates network quality
+            param_ranges: Dictionary of parameter names and (min, max) ranges to optimize
+            sim_kwargs: Fixed keyword arguments for simulation model
+            eval_kwargs: Fixed keyword arguments for evaluation function
             n_parallel: Number of parallel jobs (-1 for all cores)
-            distance_fn: Function to compute the "signalling distance" between nodes,
-                         defaults to resistance distance
-            evaluator_kwargs: Additional arguments for the evaluator
             random_seed: Random seed for reproducibility
         """
-        self.coordinates = coordinates
-        self.empirical_network = empirical_network
-        self.n_iterations = n_iterations
+        self.simulation_model = simulation_model
+        self.evaluation_function = evaluation_function
+        self.param_ranges = param_ranges
+        self.sim_kwargs = sim_kwargs
+        self.eval_kwargs = eval_kwargs
         self.n_parallel = n_parallel
         self.random_seed = random_seed
-        self.distance_fn = distance_fn
-        self.evaluator_kwargs = evaluator_kwargs if evaluator_kwargs else {}
-        # Set up evaluator
-        if evaluator is None:
-            self.evaluator = density_distance
-        else:
-            self.evaluator = evaluator
-            
-        # Compute euclidean distances once
-        from scipy.spatial.distance import pdist, squareform
-        self.euclidean_distance = squareform(pdist(coordinates))
         
     def _create_parameter_space(
         self,
@@ -295,51 +284,44 @@ class NetworkOptimizer:
         params: Dict[str, float],
         batch_id: Optional[int] = None
     ) -> float:
-        """Run simulation with given parameters and evaluate."""
+        """
+        Run simulation with given parameters and evaluate.
         
-        # Create parameter trajectories if needed
-        alpha = params.get('alpha', np.full(self.n_iterations, 1.0))
-        beta = params.get('beta', np.full(self.n_iterations, 0.1))
-        noise = params.get('noise', np.zeros(self.n_iterations))
-        penalty = params.get('connectivity_penalty', np.zeros(self.n_iterations))
-        evaluator_kwargs = params.get('evaluator_kwargs', {})
-        # Add trajectory parameters if present
-        if 'beta_growth' in params:
-            beta = np.linspace(0, beta, self.n_iterations)
-        if 'noise_std' in params:
-            noise = np.random.normal(0, params['noise_std'], self.n_iterations)
+        Args:
+            params: Dictionary of parameters to optimize
+            batch_id: Optional batch identifier for parallel runs
+        
+        Returns:
+            float: Evaluation score
+        """
+        # Update simulation kwargs with optimization parameters
+        sim_kwargs = self.sim_kwargs.copy()
+        sim_kwargs.update(params)
+        
+        # Add batch-specific random seed if needed
+        if batch_id is not None and 'random_seed' in sim_kwargs:
+            sim_kwargs['random_seed'] = sim_kwargs['random_seed'] + batch_id
             
         # Run simulation
-        history = simulate_network_evolution(
-            coordinates=self.coordinates,
-            n_iterations=self.n_iterations,
-            distance_fn=self.distance_fn,
-            alpha=alpha,
-            beta=beta,
-            noise=noise,
-            connectivity_penalty=penalty,
-            n_jobs=1,  # We're already parallelizing at a higher level
-            random_seed=self.random_seed + batch_id if batch_id is not None else None
-        )
+        history = self.simulation_model(**sim_kwargs)
         
-        # Evaluate final network
-        final_network = history[:, :, -1]
-        score = self.evaluator(
-            final_network,
-            self.empirical_network,
-            **evaluator_kwargs,
-        )
+        # Get final network state
+        final_network = history[:, :, -1] if history.ndim == 3 else history
         
-        return score
+        # Evaluate network
+        score = self.evaluation_function(final_network, **self.eval_kwargs)
+        
+        # Handle both dict and float return types
+        return score['energy'] if isinstance(score, dict) else score
         
     def optimize(
         self,
-        param_ranges: Dict[str, tuple],
         n_calls: int = 50,
         n_initial_points: int = 10,
         n_parallel_samples: int = 16,
         acquisition_function: str = "gp_hedge",
-        verbose: bool = True
+        verbose: bool = True,
+        **optimizer_kwargs
     ) -> OptimizationResults:
         """
         Run Bayesian optimization to find best parameters.
@@ -355,7 +337,7 @@ class NetworkOptimizer:
         Returns:
             OptimizationResults containing best parameters and optimization history
         """
-        space = self._create_parameter_space(param_ranges)
+        space = self._create_parameter_space(self.param_ranges)
 
         # Create objective function with named arguments
         @use_named_args(space)
@@ -386,7 +368,7 @@ class NetworkOptimizer:
             )
         
         # Collect results
-        param_names = list(param_ranges.keys())
+        param_names = list(self.param_ranges.keys())
         best_params = dict(zip(param_names, result.x))
         
         all_params = [
@@ -405,91 +387,3 @@ class NetworkOptimizer:
                 'specs': result.specs
             }
         )
-        
-        
-@dataclass
-class PSOResults:
-    best_parameters: Dict[str, float]
-    best_score: float
-    position_history: np.ndarray
-    cost_history: np.ndarray
-
-class ParallelNetworkOptimizer:
-    def __init__(
-        self,
-        simulation_model: Callable,
-        evaluation_function: Callable,
-        param_bounds: Dict[str, tuple],
-        sim_kwargs: Dict[str, Any] = {},
-        eval_kwargs: Dict[str, Any] = {},
-        random_seed: Optional[int] = None
-    ):
-        self.simulation_model = simulation_model
-        self.evaluation_function = evaluation_function
-        self.sim_kwargs = sim_kwargs
-        self.eval_kwargs = eval_kwargs
-        self.param_names = list(param_bounds.keys())
-        self.bounds = (
-            np.array([b[0] for b in param_bounds.values()]),
-            np.array([b[1] for b in param_bounds.values()])
-        )
-        if random_seed is not None:
-            np.random.seed(random_seed)
-
-    def _objective(self, positions):
-        scores = []
-        for pos in positions:
-            # Convert position array to parameter dictionary
-            params = dict(zip(self.param_names, pos))
-            
-            # Run simulation with current parameters
-            simulation_result = self.simulation_model(
-                **params,
-                **self.sim_kwargs
-            )
-            
-            # Evaluate simulation result
-            score = self.evaluation_function(
-                simulation_result[:,:, -1],
-                **self.eval_kwargs
-            )
-            
-            scores.append(score)
-            
-        return np.array(scores)
-
-    def optimize(
-        self,
-        n_particles: int = 20,
-        n_iterations: int = 50,
-        pso_kwargs: Dict[str, Any] = {}
-    ) -> PSOResults:
-        # Set up PSO optimizer with default parameters
-        optimizer = GlobalBestPSO(
-            n_particles=n_particles,
-            dimensions=len(self.param_names),
-            options={
-                'c1': 1.5,  # cognitive parameter
-                'c2': 1.5,  # social parameter
-                'w': 0.7,   # inertia weight
-                'k': cpu_count(),  # number of processes
-                'p': 2,     # minkowski p-norm
-                **pso_kwargs
-            },
-            bounds=self.bounds
-        )
-
-        # Run optimization
-        best_cost, best_pos = optimizer.optimize(
-            self._objective,
-            iters=n_iterations,
-            n_processes=cpu_count(),
-            verbose=True
-        )
-
-        return PSOResults(
-            best_parameters=dict(zip(self.param_names, best_pos)),
-            best_score=best_cost,
-            position_history=optimizer.pos_history,
-            cost_history=optimizer.cost_history
-        )        

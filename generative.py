@@ -83,7 +83,8 @@ def validate_parameters(
     *trajectories: Trajectory,
     names: tuple[str, ...],
     allow_float: tuple[bool, ...],
-    allow_zero: tuple[bool, ...]
+    allow_zero: tuple[bool, ...],
+    allow_none: Optional[tuple[bool, ...]] = None
 ) -> None:
     """
     Validate simulation parameters.
@@ -107,9 +108,12 @@ def validate_parameters(
         ...     allow_zero=(False, True)
         ... )
     """
-    for traj, name, float_ok, zero_ok in zip(
-        trajectories, names, allow_float, allow_zero
+    none_ok = allow_none if allow_none is not None else (False,) * len(trajectories)
+    for traj, name, float_ok, zero_ok, none_ok in zip(
+        trajectories, names, allow_float, allow_zero, none_ok
     ):
+        if none_ok and traj is None:
+            continue
         if isinstance(traj, (float, int)):
             if not float_ok:
                 raise ValueError(
@@ -477,6 +481,49 @@ def compute_node_payoff(
         
     return payoff
 
+@njit
+def sample_nodes_with_centers(
+    n_nodes: int,
+    centers: FloatArray,
+    coordinates: FloatArray,
+    width: float,
+    t: int
+) -> tuple[int, int]:
+    """
+    Sample nodes using gaussian distribution around given centers.
+    
+    Args:
+        n_nodes: Number of nodes in network
+        centers: Center nodes for sampling (n_centers, n_iterations) or (1, n_iterations)
+        coordinates: Node coordinates (n_nodes, n_dimensions)
+        width: Width of gaussian distribution
+        t: Current iteration
+        
+    Returns:
+        Tuple of sampled node indices (i, j)
+    """
+    # Get current centers
+    current_centers = centers[:, t]
+    n_centers = len(current_centers)
+    
+    # Randomly select a center
+    center_idx = np.random.randint(0, n_centers)
+    center = int(current_centers[center_idx])
+    
+    # Compute distances from center to all nodes
+    center_coords = coordinates[center]
+    distances = np.sqrt(np.sum((coordinates - center_coords)**2, axis=1))
+    
+    # Compute gaussian probabilities
+    probs = np.exp(-distances**2 / (2 * width**2))
+    probs /= np.sum(probs)
+    
+    # Sample two nodes based on probabilities
+    i = np.random.choice(n_nodes, p=probs)
+    j = np.random.choice(n_nodes, p=probs)
+    
+    return i, j
+
 def simulate_network_evolution(
     coordinates: FloatArray,
     n_iterations: int,
@@ -487,7 +534,9 @@ def simulate_network_evolution(
     connectivity_penalty: Trajectory,
     initial_adjacency: Optional[FloatArray] = None,
     n_jobs: int = -1,
-    batch_size: int = 32,
+    batch_size: Trajectory = 32,
+    sampling_centers: Optional[FloatArray] = None,
+    sampling_width: Optional[float] = None,
     random_seed: Optional[int] = None
 ) -> FloatArray:
     """
@@ -512,11 +561,22 @@ def simulate_network_evolution(
     # Parameter validation
     validate_parameters(
         n_iterations,
-        alpha, beta, noise, connectivity_penalty,
-        names=('alpha', 'beta', 'noise', 'connectivity_penalty'),
-        allow_float=(True, True, False, True),
-        allow_zero=(True, True, True, True)
+        alpha, beta, noise, connectivity_penalty, batch_size,
+        names=('alpha', 'beta', 'noise', 'connectivity_penalty', 'batch_size'),
+        allow_float=(True, True, False, True, True),
+        allow_zero=(True, True, True, True, False)
     )
+    
+    if sampling_centers is not None:
+        if sampling_width is None:
+            raise ValueError("sampling_width must be provided when using sampling_centers")
+        if sampling_centers.ndim != 2:
+            raise ValueError("sampling_centers must be 2D array (n_centers, n_iterations)")
+        if sampling_centers.shape[1] != n_iterations:
+            raise ValueError(
+                f"sampling_centers length {sampling_centers.shape[1]} doesn't match "
+                f"simulation length {n_iterations}"
+            )
     
     if random_seed is not None:
         np.random.seed(random_seed)
@@ -546,9 +606,17 @@ def simulate_network_evolution(
             noise_t = get_param_value(noise, t) if isinstance(noise, np.ndarray) else 0
             penalty_t = get_param_value(connectivity_penalty, t)
             
+            # Get current batch size
+            batch_size_t = get_param_value(batch_size, t)
+            
             # Process edge flips in parallel batches
             def process_flip(_):
-                i, j = np.random.randint(0, n_nodes, size=2)
+                if sampling_centers is not None:
+                    i, j = sample_nodes_with_centers(
+                        n_nodes, sampling_centers, coordinates, sampling_width, t
+                    )
+                else:
+                    i, j = np.random.randint(0, n_nodes, size=2)
                 if i == j:
                     return None
                     
@@ -575,7 +643,7 @@ def simulate_network_evolution(
                 }
                 
             # Process batch in parallel
-            n_flips = batch_size
+            n_flips = int(batch_size_t)
             results = Parallel(n_jobs=n_jobs)(
                 delayed(process_flip)(i) for i in range(n_flips)
             )
