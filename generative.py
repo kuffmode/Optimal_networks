@@ -659,3 +659,128 @@ def simulate_network_evolution(
             pbar.update(1)
             
     return history
+
+def optimize_weights(
+    binary_adjacency: FloatArray,
+    coordinates: FloatArray,
+    n_iterations: int,
+    distance_fn: DistanceMetric,
+    alpha: Trajectory,
+    beta: Trajectory,
+    total_weight: float = 1.0,
+    learning_rate: float = 0.01,
+    n_jobs: int = -1,
+    random_seed: Optional[int] = None
+) -> FloatArray:
+    """
+    Optimize connection weights given a binary network structure.
+    
+    Args:
+        binary_adjacency: Binary adjacency matrix defining network structure
+        coordinates: Node coordinates (n_nodes, n_dimensions)
+        n_iterations: Number of optimization steps
+        distance_fn: Function computing distance metric (e.g., resistance_distance)
+        alpha: Weight of distance term
+        beta: Weight of wiring cost
+        total_weight: Total connection weight budget per node
+        learning_rate: Step size for weight updates
+        n_jobs: Number of parallel jobs
+        batch_size: Number of nodes to update in parallel
+        random_seed: Random seed for reproducibility
+        
+    Returns:
+        Optimized weighted adjacency matrix
+    """
+    if random_seed is not None:
+        np.random.seed(random_seed)
+        
+    n_nodes = len(coordinates)
+    
+    # Initialize weights uniformly across existing connections
+    weighted_adj = binary_adjacency.copy()
+    for i in range(n_nodes):
+        connections = binary_adjacency[i] > 0
+        n_connections = np.sum(connections)
+        if n_connections > 0:
+            weighted_adj[i, connections] = total_weight / n_connections
+    
+    # Pre-compute euclidean distances for wiring cost
+    euclidean_dist = np.zeros((n_nodes, n_nodes))
+    for i in range(n_nodes):
+        euclidean_dist[i] = np.sqrt(np.sum((coordinates[i] - coordinates)**2, axis=1))
+    
+    def optimize_node_weights(node_idx):
+        """Optimize weights for a single node while maintaining budget."""
+        if np.sum(binary_adjacency[node_idx]) == 0:
+            return None
+            
+        # Get current state
+        current_weights = weighted_adj[node_idx].copy()
+        current = compute_node_payoff(
+            node_idx, weighted_adj, coordinates, distance_fn,
+            alpha_t, beta_t, 0, 0
+        )
+        
+        # Try adjusting each existing connection
+        connections = np.where(binary_adjacency[node_idx] > 0)[0]
+        best_weights = current_weights.copy()
+        best_payoff = current
+        
+        for i in connections:
+            for j in connections:
+                if i != j:
+                    # Try moving some weight from j to i
+                    test_weights = current_weights.copy()
+                    delta = min(learning_rate, test_weights[j])
+                    test_weights[j] -= delta
+                    test_weights[i] += delta
+                    
+                    # Apply changes symmetrically
+                    test_adj = weighted_adj.copy()
+                    test_adj[node_idx] = test_weights
+                    test_adj[:, node_idx] = test_weights
+                    
+                    # Evaluate new payoff
+                    new_payoff = compute_node_payoff(
+                        node_idx, test_adj, coordinates, distance_fn,
+                        alpha_t, beta_t, 0, 0
+                    )
+                    
+                    if new_payoff > best_payoff:
+                        best_payoff = new_payoff
+                        best_weights = test_weights.copy()
+        
+        if best_payoff > current:
+            return {
+                'node': node_idx,
+                'weights': best_weights
+            }
+        return None
+    
+    # Optimization loop
+    history = np.zeros((n_nodes, n_nodes, n_iterations))
+    history[:, :, 0] = weighted_adj
+    
+    with tqdm(total=n_iterations-1, desc="Optimizing weights") as pbar:
+        for t in range(1, n_iterations):
+            # Get current parameters
+            alpha_t = get_param_value(alpha, t)
+            beta_t = get_param_value(beta, t)
+            
+            # Process nodes in parallel
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(optimize_node_weights)(i) 
+                for i in range(n_nodes)
+            )
+            
+            # Apply accepted weight changes
+            for result in results:
+                if result is not None:
+                    node = result['node']
+                    weighted_adj[node] = result['weights']
+                    weighted_adj[:, node] = result['weights']
+                    
+            history[:, :, t] = weighted_adj
+            pbar.update(1)
+            
+    return history
