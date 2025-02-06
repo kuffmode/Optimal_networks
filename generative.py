@@ -430,6 +430,83 @@ def search_information(W, coordinates):
     return SI
 
 @jit_safe()
+def topological_distance(adj_matrix, coordinates):
+    """
+    Compute pairwise cosine similarity between nodes based on their edge patterns.
+    
+    Args:
+        adj_matrix (np.ndarray): Binary adjacency matrix (N x N)
+        
+    Returns:
+        np.ndarray: Matching index matrix (N x N)
+    """
+    N = adj_matrix.shape[0]
+    matching_matrix = np.zeros((N, N))
+    
+    for i in range(N):
+        edges_i = adj_matrix[i]
+        norm_i = np.sqrt(np.sum(edges_i * edges_i))
+        
+        for j in range(i, N):  # Symmetric matrix, compute upper triangle
+            edges_j = adj_matrix[j]
+            norm_j = np.sqrt(np.sum(edges_j * edges_j))
+            
+            # Handle zero-degree nodes
+            if norm_i == 0 or norm_j == 0:
+                matching_matrix[i, j] = matching_matrix[j, i] = 0
+                continue
+                
+            # Compute cosine similarity
+            dot_product = np.sum(edges_i * edges_j)
+            similarity = dot_product / (norm_i * norm_j)
+            
+            # Fill both triangles due to symmetry
+            matching_matrix[i, j] = matching_matrix[j, i] = similarity
+            
+    return 1-matching_matrix
+
+@jit_safe()
+def matching_distance(adj_matrix,coordinates):
+    """
+    Compute pairwise matching index between nodes.
+    Matching index = 2 * (shared connections) / (total unshared connections)
+    
+    Args:
+        adj_matrix (np.ndarray): Binary adjacency matrix (N x N)
+        
+    Returns:
+        np.ndarray: Matching index matrix (N x N)
+    """
+    N = adj_matrix.shape[0]
+    matching_matrix = np.zeros((N, N))
+    
+    for i in range(N):
+        for j in range(i+1, N):  # Compute upper triangle only
+            # Get neighbors excluding i and j
+            edges_i = adj_matrix[i].copy()
+            edges_j = adj_matrix[j].copy()
+            
+            # Remove mutual connection and self-connections
+            edges_i[i] = edges_i[j] = 0
+            edges_j[i] = edges_j[j] = 0
+            
+            # Count shared and total connections (numba-friendly)
+            shared = np.sum(np.logical_and(edges_i, edges_j))
+            total = np.sum(np.logical_or(edges_i, edges_j))
+            
+            # Compute matching index
+            if total > 0:
+                similarity = shared / total
+            else:
+                similarity = 0.0
+                
+            # Fill both triangles due to symmetry
+            matching_matrix[i, j] = matching_matrix[j, i] = similarity
+            
+    return 1-matching_matrix
+
+
+@jit_safe()
 def compute_node_payoff(
     node: int,
     adjacency: FloatArray,
