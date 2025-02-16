@@ -12,7 +12,7 @@ from skopt.utils import use_named_args
 from dataclasses import dataclass
 from joblib import Parallel, delayed
 from tqdm import tqdm
-import warnings
+from sklearn.metrics.pairwise import cosine_similarity
 
 def evaluator(synthetic, empirical, euclidean_distance):
     degrees_synthetic = np.sum(synthetic, axis=0)
@@ -217,6 +217,60 @@ def density_distance(final_network, empirical):
     
     # Return absolute difference
     return abs(density_synthetic - density_empirical)
+
+def check_density(adj):
+    return np.sum(adj)/(adj.shape[0] * (adj.shape[0]-1))
+
+def calculate_wiring_cost(adj, euclidean_distance):
+    return np.mean(adj * euclidean_distance)
+
+def calculate_endpoint_similarity(synthetic_matrix, empirical_matrix):
+    similarities = np.zeros(synthetic_matrix.shape[0])
+    for i in range(synthetic_matrix.shape[0]):
+        similarities[i] = cosine_similarity(synthetic_matrix[i].reshape(1, -1),
+                                            empirical_matrix[i].reshape(1, -1))
+    return similarities
+
+
+def evaluate_adjacency(empirical_adj, simulated_adj):
+    """
+    Compute Accuracy and F1 score between two binary adjacency matrices.
+    
+    Args:
+        empirical_adj (np.ndarray): Empirical adjacency (0/1), shape (n, n)
+        simulated_adj (np.ndarray): Simulated adjacency (0/1), shape (n, n)
+    
+    Returns:
+        (accuracy, f1): Tuple of floats
+            - accuracy is in [0, 100] (percentage)
+            - f1 is in [0, 1]
+    """
+    # Ensure inputs are numpy arrays and flattened (if we want to ignore diagonal, filter it out)
+    # Here, we keep the entire matrix as is, including diagonal if present.
+    A_emp = empirical_adj.astype(int).ravel()
+    A_sim = simulated_adj.astype(int).ravel()
+
+    # Calculate confusion matrix components:
+    TP = np.sum((A_emp == 1) & (A_sim == 1))
+    FP = np.sum((A_emp == 0) & (A_sim == 1))
+    TN = np.sum((A_emp == 0) & (A_sim == 0))
+    FN = np.sum((A_emp == 1) & (A_sim == 0))
+
+    # Accuracy (percentage)
+    total = TP + FP + TN + FN
+    accuracy = 100.0 * (TP + TN) / total if total > 0 else 0.0
+
+    # Precision and Recall
+    precision = TP / (TP + FP) if (TP + FP) > 0 else 0.0
+    recall = TP / (TP + FN) if (TP + FN) > 0 else 0.0
+
+    # F1 Score (in [0, 1])
+    if (precision + recall) > 0:
+        f1 = 2.0 * precision * recall / (precision + recall)
+    else:
+        f1 = 0.0
+
+    return accuracy, f1
 
 FloatArray = npt.NDArray[np.float64]
 Parameter = TypeVar('Parameter', float, FloatArray)
