@@ -72,6 +72,7 @@ def process_matrix(matrix):
             else:
                 result[i, j] = val
     return result
+
 # Type Definitions
 FloatArray = npt.NDArray[np.float64]
 Trajectory: TypeAlias = Union[float, FloatArray]
@@ -229,17 +230,21 @@ def compute_component_sizes(adjacency: FloatArray) -> FloatArray:
     return sizes
 
 @jit_safe()
-def propagation_distance(adjacency_matrix, coordinates):
+def propagation_distance(adjacency_matrix, coordinates=None, alpha=0.9, eps=1e-10):
     """
-    Computes the propagation distance as:
-        - log( (I - 0.5 A)^{-1} * (I - 0.5 A)^{-1}.T )
-
+    Computes the propagation distance matrix using:
+        -log((I - α*A)^{-1} * (I - α*A)^{-1}.T)
+    
     Parameters
     ----------
     adjacency_matrix : np.ndarray
-        A square adjacency matrix (must be invertible for I - 0.5*A).
+        A square adjacency matrix (must be invertible for I - α*A).
     coordinates : np.ndarray
-        Not used in this computation, but kept for signature consistency.
+        Not used in computation, kept for signature consistency.
+    alpha : float, optional
+        Scaling factor for the adjacency matrix (default: 0.5).
+    eps : float, optional
+        Small constant to ensure numerical stability (default: 1e-10).
     
     Returns
     -------
@@ -247,23 +252,32 @@ def propagation_distance(adjacency_matrix, coordinates):
         The elementwise -log of the propagation matrix.
     """
     N = adjacency_matrix.shape[0]
-    adjacency_matrix = adjacency_matrix.astype(np.float64)
-    spectral_radius = np.max(np.abs(np.linalg.eigvals(adjacency_matrix)))
-    adjacency_matrix /= spectral_radius
-    # Identity
+    A = adjacency_matrix.astype(np.float64)
+    
+    # Normalize adjacency matrix
+    spectral_radius = np.max(np.abs(np.linalg.eigvalsh(A)))
+    if spectral_radius > eps:
+        A /= spectral_radius
+    
+    # Compute M = I - α*A
     I = np.eye(N, dtype=np.float64)
+    M = I - alpha * A
     
-    # M = I - 0.5 * A
-    M = I - 0.5 * adjacency_matrix
+    # Compute inverse and propagation matrix
+    M_inv = np.linalg.inv(M)
+    prop_matrix = M_inv @ M_inv.T
     
-    # inverse_matrix = M^{-1}
-    inverse_matrix = np.linalg.inv(M)
+    # Set diagonal to eps and ensure positivity
+    prop_matrix = _set_diagonal(prop_matrix, 0.)
     
-    # propagation_matrix = M^{-1} * (M^{-1})^T
-    propagation_matrix = inverse_matrix @ inverse_matrix.T
-    propagation_matrix = _set_diagonal(propagation_matrix, 0)
-    propagation_dist = -np.log(propagation_matrix)
-    return process_matrix(propagation_dist)
+    # Manual element-wise maximum with eps (numba-friendly)
+    for i in range(N):
+        for j in range(N):
+            if i != j and prop_matrix[i,j] < eps:
+                prop_matrix[i,j] = eps
+    
+    # Compute distance
+    return process_matrix(np.abs(-np.log(prop_matrix)))
 
 @njit
 def resistance_distance(adjacency: FloatArray, coordinates: FloatArray) -> FloatArray:
