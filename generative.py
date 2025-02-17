@@ -230,7 +230,7 @@ def compute_component_sizes(adjacency: FloatArray) -> FloatArray:
     return sizes
 
 @jit_safe()
-def propagation_distance(adjacency_matrix, coordinates=None, alpha=0.9, eps=1e-10):
+def propagation_distance(adjacency_matrix, coordinates=None, alpha=0.8, eps=1e-10):
     """
     Computes the propagation distance matrix using:
         -log((I - α*A)^{-1} * (I - α*A)^{-1}.T)
@@ -327,7 +327,7 @@ def resistance_distance(adjacency: FloatArray, coordinates: FloatArray) -> Float
     return resistance
 
 @jit_safe()
-def shortest_path_distance(adjacency_matrix,coordinates):
+def shortest_path_distance(adjacency_matrix,coordinates = None):
     """
     Computes shortest-path distances between all pairs of nodes
     using the Floyd-Warshall algorithm.
@@ -373,7 +373,7 @@ def shortest_path_distance(adjacency_matrix,coordinates):
 
 
 @jit_safe()
-def search_information(W, coordinates):
+def search_information(W, coordinates = None):
     """
     Calculate search information for a memoryless random walker.
 
@@ -444,7 +444,7 @@ def search_information(W, coordinates):
     return SI
 
 @jit_safe()
-def topological_distance(adj_matrix, coordinates):
+def topological_distance(adj_matrix, coordinates = None):
     """
     Compute pairwise cosine similarity between nodes based on their edge patterns.
     
@@ -480,7 +480,7 @@ def topological_distance(adj_matrix, coordinates):
     return 1-matching_matrix
 
 @jit_safe()
-def matching_distance(adj_matrix,coordinates):
+def matching_distance(adj_matrix,coordinates = None):
     """
     Compute pairwise matching index between nodes.
     Matching index = 2 * (shared connections) / (total unshared connections)

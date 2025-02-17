@@ -12,7 +12,10 @@ from skopt.utils import use_named_args
 from dataclasses import dataclass
 from joblib import Parallel, delayed
 from tqdm import tqdm
+from tqdm_joblib import tqdm_joblib
 from sklearn.metrics.pairwise import cosine_similarity
+from generative import resistance_distance, shortest_path_distance, propagation_distance, topological_distance
+import pandas as pd
 
 def evaluator(synthetic, empirical, euclidean_distance):
     degrees_synthetic = np.sum(synthetic, axis=0)
@@ -271,6 +274,105 @@ def evaluate_adjacency(empirical_adj, simulated_adj):
         f1 = 0.0
 
     return accuracy, f1
+
+
+def compute_graph_metrics(simulated_tensor,
+                          empirical_adjmat,
+                          euclidean_distance,
+                          coordinates):
+    measure_labels = ["diffusion distance",
+                      "shortest path distance",
+                      "propagation distance",
+                      "topological distance",
+                      "density",
+                      "wiring cost",
+                      "average clustering",
+                      "degree assortativity",
+                      "small-worldness",
+                      "endpoint similarity",
+                      "accuracy",
+                      "F1 score"]
+    measures = np.zeros((len(measure_labels),
+                         simulated_tensor.shape[2]))
+
+    for timepoint in tqdm(range(simulated_tensor.shape[2]),desc="Computing graph metrics"):
+        G = nx.from_numpy_array(simulated_tensor[:,:,timepoint])
+        measures[0,timepoint] = resistance_distance(simulated_tensor[:,:,timepoint],coordinates).mean()
+        measures[1,timepoint] = shortest_path_distance(simulated_tensor[:,:,timepoint],coordinates).mean()
+        measures[2,timepoint] = propagation_distance(simulated_tensor[:,:,timepoint],coordinates).mean()
+        measures[3,timepoint] = topological_distance(simulated_tensor[:,:,timepoint],coordinates).mean()
+        
+        measures[4,timepoint] = check_density(simulated_tensor[:,:,timepoint])
+        measures[5,timepoint] = calculate_wiring_cost(simulated_tensor[:,:,timepoint],euclidean_distance)
+        
+        measures[6,timepoint] = nx.average_clustering(G)
+        measures[7,timepoint] = nx.degree_assortativity_coefficient(G)
+        measures[8,timepoint] = nx.smallworld.sigma(G)
+        
+        measures[9,timepoint] = calculate_endpoint_similarity(simulated_tensor[:,:,timepoint],empirical_adjmat).mean()
+        measures[10,timepoint], measures[11,timepoint] = evaluate_adjacency(empirical_adjmat,simulated_tensor[:,:,timepoint])
+    return pd.DataFrame(measures.T,columns=measure_labels)
+
+def _compute_metrics_for_timepoint(timepoint, 
+                                   simulated_tensor, 
+                                   empirical_adjmat, 
+                                   euclidean_distance, 
+                                   coordinates):
+    """
+    Computes all metrics for a given timepoint and returns them as a 1D array.
+    """
+    sim = simulated_tensor[:, :, timepoint]
+    G = nx.from_numpy_array(sim)
+    
+    metrics = np.zeros(12)
+    metrics[0] = resistance_distance(sim, coordinates).mean()
+    metrics[1] = shortest_path_distance(sim, coordinates).mean()
+    metrics[2] = propagation_distance(sim, coordinates).mean()
+    metrics[3] = topological_distance(sim, coordinates).mean()
+    metrics[4] = check_density(sim)
+    metrics[5] = calculate_wiring_cost(sim, euclidean_distance)
+    metrics[6] = nx.average_clustering(G)
+    metrics[7] = nx.degree_assortativity_coefficient(G)
+    metrics[8] = nx.smallworld.sigma(G)
+    metrics[9] = calculate_endpoint_similarity(sim, empirical_adjmat).mean()
+    metrics[10], metrics[11] = evaluate_adjacency(empirical_adjmat, sim)
+    
+    return metrics
+
+def compute_graph_metrics_parallel(simulated_tensor, 
+                                   empirical_adjmat, 
+                                   euclidean_distance, 
+                                   coordinates):
+    measure_labels = [
+        "diffusion distance",
+        "shortest path distance",
+        "propagation distance",
+        "topological distance",
+        "density",
+        "wiring cost",
+        "average clustering",
+        "degree assortativity",
+        "small-worldness",
+        "endpoint similarity",
+        "accuracy",
+        "F1 score"
+    ]
+    
+    n_timepoints = simulated_tensor.shape[2]
+    
+    # Use tqdm_joblib to wrap joblib.Parallel for a progress bar.
+    with tqdm_joblib(tqdm(total=n_timepoints, desc="Computing graph metrics")):
+        results = Parallel(n_jobs=-1)(
+            delayed(_compute_metrics_for_timepoint)(tp, simulated_tensor, empirical_adjmat, euclidean_distance, coordinates)
+            for tp in range(n_timepoints)
+        )
+    
+    # Convert list of 1D arrays into a 2D NumPy array.
+    # Each element in 'results' is of shape (12,), so we stack along axis 1.
+    measures = np.array(results).T  # Shape: (12, n_timepoints)
+    
+    # Return a DataFrame with rows corresponding to timepoints.
+    return pd.DataFrame(measures.T, columns=measure_labels)
 
 FloatArray = npt.NDArray[np.float64]
 Parameter = TypeVar('Parameter', float, FloatArray)
