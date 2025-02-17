@@ -72,6 +72,7 @@ def process_matrix(matrix):
             else:
                 result[i, j] = val
     return result
+
 # Type Definitions
 FloatArray = npt.NDArray[np.float64]
 Trajectory: TypeAlias = Union[float, FloatArray]
@@ -229,17 +230,21 @@ def compute_component_sizes(adjacency: FloatArray) -> FloatArray:
     return sizes
 
 @jit_safe()
-def propagation_distance(adjacency_matrix, coordinates):
+def propagation_distance(adjacency_matrix, coordinates=None, alpha=0.8, eps=1e-10):
     """
-    Computes the propagation distance as:
-        - log( (I - 0.5 A)^{-1} * (I - 0.5 A)^{-1}.T )
-
+    Computes the propagation distance matrix using:
+        -log((I - α*A)^{-1} * (I - α*A)^{-1}.T)
+    
     Parameters
     ----------
     adjacency_matrix : np.ndarray
-        A square adjacency matrix (must be invertible for I - 0.5*A).
+        A square adjacency matrix (must be invertible for I - α*A).
     coordinates : np.ndarray
-        Not used in this computation, but kept for signature consistency.
+        Not used in computation, kept for signature consistency.
+    alpha : float, optional
+        Scaling factor for the adjacency matrix (default: 0.5).
+    eps : float, optional
+        Small constant to ensure numerical stability (default: 1e-10).
     
     Returns
     -------
@@ -247,23 +252,32 @@ def propagation_distance(adjacency_matrix, coordinates):
         The elementwise -log of the propagation matrix.
     """
     N = adjacency_matrix.shape[0]
-    adjacency_matrix = adjacency_matrix.astype(np.float64)
-    spectral_radius = np.max(np.abs(np.linalg.eigvals(adjacency_matrix)))
-    adjacency_matrix /= spectral_radius
-    # Identity
+    A = adjacency_matrix.astype(np.float64)
+    
+    # Normalize adjacency matrix
+    spectral_radius = np.max(np.abs(np.linalg.eigvalsh(A)))
+    if spectral_radius > eps:
+        A /= spectral_radius
+    
+    # Compute M = I - α*A
     I = np.eye(N, dtype=np.float64)
+    M = I - alpha * A
     
-    # M = I - 0.5 * A
-    M = I - 0.5 * adjacency_matrix
+    # Compute inverse and propagation matrix
+    M_inv = np.linalg.inv(M)
+    prop_matrix = M_inv @ M_inv.T
     
-    # inverse_matrix = M^{-1}
-    inverse_matrix = np.linalg.inv(M)
+    # Set diagonal to eps and ensure positivity
+    prop_matrix = _set_diagonal(prop_matrix, 0.)
     
-    # propagation_matrix = M^{-1} * (M^{-1})^T
-    propagation_matrix = inverse_matrix @ inverse_matrix.T
-    propagation_matrix = _set_diagonal(propagation_matrix, 0)
-    propagation_dist = -np.log(propagation_matrix)
-    return process_matrix(propagation_dist)
+    # Manual element-wise maximum with eps (numba-friendly)
+    for i in range(N):
+        for j in range(N):
+            if i != j and prop_matrix[i,j] < eps:
+                prop_matrix[i,j] = eps
+    
+    # Compute distance
+    return process_matrix(np.abs(-np.log(prop_matrix)))
 
 @njit
 def resistance_distance(adjacency: FloatArray, coordinates: FloatArray) -> FloatArray:
@@ -313,7 +327,7 @@ def resistance_distance(adjacency: FloatArray, coordinates: FloatArray) -> Float
     return resistance
 
 @jit_safe()
-def shortest_path_distance(adjacency_matrix,coordinates):
+def shortest_path_distance(adjacency_matrix,coordinates = None):
     """
     Computes shortest-path distances between all pairs of nodes
     using the Floyd-Warshall algorithm.
@@ -359,7 +373,7 @@ def shortest_path_distance(adjacency_matrix,coordinates):
 
 
 @jit_safe()
-def search_information(W, coordinates):
+def search_information(W, coordinates = None):
     """
     Calculate search information for a memoryless random walker.
 
@@ -428,6 +442,83 @@ def search_information(W, coordinates):
             SI[i, j] = -np.log2(product)
 
     return SI
+
+@jit_safe()
+def topological_distance(adj_matrix, coordinates = None):
+    """
+    Compute pairwise cosine similarity between nodes based on their edge patterns.
+    
+    Args:
+        adj_matrix (np.ndarray): Binary adjacency matrix (N x N)
+        
+    Returns:
+        np.ndarray: Matching index matrix (N x N)
+    """
+    N = adj_matrix.shape[0]
+    matching_matrix = np.zeros((N, N))
+    
+    for i in range(N):
+        edges_i = adj_matrix[i]
+        norm_i = np.sqrt(np.sum(edges_i * edges_i))
+        
+        for j in range(i, N):  # Symmetric matrix, compute upper triangle
+            edges_j = adj_matrix[j]
+            norm_j = np.sqrt(np.sum(edges_j * edges_j))
+            
+            # Handle zero-degree nodes
+            if norm_i == 0 or norm_j == 0:
+                matching_matrix[i, j] = matching_matrix[j, i] = 0
+                continue
+                
+            # Compute cosine similarity
+            dot_product = np.sum(edges_i * edges_j)
+            similarity = dot_product / (norm_i * norm_j)
+            
+            # Fill both triangles due to symmetry
+            matching_matrix[i, j] = matching_matrix[j, i] = similarity
+            
+    return 1-matching_matrix
+
+@jit_safe()
+def matching_distance(adj_matrix,coordinates = None):
+    """
+    Compute pairwise matching index between nodes.
+    Matching index = 2 * (shared connections) / (total unshared connections)
+    
+    Args:
+        adj_matrix (np.ndarray): Binary adjacency matrix (N x N)
+        
+    Returns:
+        np.ndarray: Matching index matrix (N x N)
+    """
+    N = adj_matrix.shape[0]
+    matching_matrix = np.zeros((N, N))
+    
+    for i in range(N):
+        for j in range(i+1, N):  # Compute upper triangle only
+            # Get neighbors excluding i and j
+            edges_i = adj_matrix[i].copy()
+            edges_j = adj_matrix[j].copy()
+            
+            # Remove mutual connection and self-connections
+            edges_i[i] = edges_i[j] = 0
+            edges_j[i] = edges_j[j] = 0
+            
+            # Count shared and total connections (numba-friendly)
+            shared = np.sum(np.logical_and(edges_i, edges_j))
+            total = np.sum(np.logical_or(edges_i, edges_j))
+            
+            # Compute matching index
+            if total > 0:
+                similarity = shared / total
+            else:
+                similarity = 0.0
+                
+            # Fill both triangles due to symmetry
+            matching_matrix[i, j] = matching_matrix[j, i] = similarity
+            
+    return 1-matching_matrix
+
 
 @jit_safe()
 def compute_node_payoff(
@@ -656,6 +747,131 @@ def simulate_network_evolution(
                     adjacency[j, i] = adjacency[i, j]
                     
             history[:, :, t] = adjacency
+            pbar.update(1)
+            
+    return history
+
+def optimize_weights(
+    binary_adjacency: FloatArray,
+    coordinates: FloatArray,
+    n_iterations: int,
+    distance_fn: DistanceMetric,
+    alpha: Trajectory,
+    beta: Trajectory,
+    total_weight: float = 1.0,
+    learning_rate: float = 0.01,
+    n_jobs: int = -1,
+    random_seed: Optional[int] = None
+) -> FloatArray:
+    """
+    Optimize connection weights given a binary network structure.
+    
+    Args:
+        binary_adjacency: Binary adjacency matrix defining network structure
+        coordinates: Node coordinates (n_nodes, n_dimensions)
+        n_iterations: Number of optimization steps
+        distance_fn: Function computing distance metric (e.g., resistance_distance)
+        alpha: Weight of distance term
+        beta: Weight of wiring cost
+        total_weight: Total connection weight budget per node
+        learning_rate: Step size for weight updates
+        n_jobs: Number of parallel jobs
+        batch_size: Number of nodes to update in parallel
+        random_seed: Random seed for reproducibility
+        
+    Returns:
+        Optimized weighted adjacency matrix
+    """
+    if random_seed is not None:
+        np.random.seed(random_seed)
+        
+    n_nodes = len(coordinates)
+    
+    # Initialize weights uniformly across existing connections
+    weighted_adj = binary_adjacency.copy()
+    for i in range(n_nodes):
+        connections = binary_adjacency[i] > 0
+        n_connections = np.sum(connections)
+        if n_connections > 0:
+            weighted_adj[i, connections] = total_weight / n_connections
+    
+    # Pre-compute euclidean distances for wiring cost
+    euclidean_dist = np.zeros((n_nodes, n_nodes))
+    for i in range(n_nodes):
+        euclidean_dist[i] = np.sqrt(np.sum((coordinates[i] - coordinates)**2, axis=1))
+    
+    def optimize_node_weights(node_idx):
+        """Optimize weights for a single node while maintaining budget."""
+        if np.sum(binary_adjacency[node_idx]) == 0:
+            return None
+            
+        # Get current state
+        current_weights = weighted_adj[node_idx].copy()
+        current = compute_node_payoff(
+            node_idx, weighted_adj, coordinates, distance_fn,
+            alpha_t, beta_t, 0, 0
+        )
+        
+        # Try adjusting each existing connection
+        connections = np.where(binary_adjacency[node_idx] > 0)[0]
+        best_weights = current_weights.copy()
+        best_payoff = current
+        
+        for i in connections:
+            for j in connections:
+                if i != j:
+                    # Try moving some weight from j to i
+                    test_weights = current_weights.copy()
+                    delta = min(learning_rate, test_weights[j])
+                    test_weights[j] -= delta
+                    test_weights[i] += delta
+                    
+                    # Apply changes symmetrically
+                    test_adj = weighted_adj.copy()
+                    test_adj[node_idx] = test_weights
+                    test_adj[:, node_idx] = test_weights
+                    
+                    # Evaluate new payoff
+                    new_payoff = compute_node_payoff(
+                        node_idx, test_adj, coordinates, distance_fn,
+                        alpha_t, beta_t, 0, 0
+                    )
+                    
+                    if new_payoff > best_payoff:
+                        best_payoff = new_payoff
+                        best_weights = test_weights.copy()
+        
+        if best_payoff > current:
+            return {
+                'node': node_idx,
+                'weights': best_weights
+            }
+        return None
+    
+    # Optimization loop
+    history = np.zeros((n_nodes, n_nodes, n_iterations))
+    history[:, :, 0] = weighted_adj
+    
+    with tqdm(total=n_iterations-1, desc="Optimizing weights") as pbar:
+        for t in range(1, n_iterations):
+            # Get current parameters
+            alpha_t = get_param_value(alpha, t)
+            beta_t = get_param_value(beta, t)
+            
+            # Process nodes in parallel
+            results = Parallel(n_jobs=n_jobs)(
+                delayed(optimize_node_weights)(i) 
+                for i in range(n_nodes)
+            )
+            
+            # Apply accepted weight changes
+            for result in results:
+                if result is not None:
+                    node = result['node']
+                    weighted_adj[node] = result['weights']
+                    weighted_adj[:, node] = result['weights']
+                    
+            history[:, :, t] = weighted_adj
             pbar.update(1)
             
     return history

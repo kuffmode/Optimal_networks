@@ -12,4 +12,6 @@ wheels/
 
 /datasets/
 report.log
-simulations/
+/simulations/
+.vscode/
+results/
