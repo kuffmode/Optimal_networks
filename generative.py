@@ -371,9 +371,8 @@ def shortest_path_distance(adjacency_matrix,coordinates = None):
 
     return dist_matrix
 
-
 @jit_safe()
-def search_information(W, coordinates = None):
+def search_information(W, coordinates = None,symmetric=True):
     """
     Calculate search information for a memoryless random walker.
 
@@ -441,7 +440,18 @@ def search_information(W, coordinates = None):
                 product *= T[path[k], path[k + 1]]
             SI[i, j] = -np.log2(product)
 
-    return SI
+    result = np.full((N, N), np.inf)
+    if symmetric:
+        for i in range(N):
+            result[i,i] = 0.0  # Keep diagonal zero
+            for j in range(i+1, N):
+                # Take minimum of both directions
+                min_val = min(SI[i,j], SI[j,i])
+                result[i,j] = min_val
+                result[j,i] = min_val
+        return result
+    else:
+        return SI
 
 @jit_safe()
 def topological_distance(adj_matrix, coordinates = None):
@@ -519,7 +529,20 @@ def matching_distance(adj_matrix,coordinates = None):
             
     return 1-matching_matrix
 
-
+@jit_safe()
+def combined_objectives(adj_matrix, coordinates=None,weight=2):
+    sp = shortest_path_distance(adj_matrix, coordinates)
+    rd = resistance_distance(adj_matrix, coordinates)
+    n = len(adj_matrix)
+    result = np.zeros((n, n), dtype=np.float64)
+    
+    # Manual mean calculation
+    for i in range(n):
+        for j in range(n):
+            result[i,j] = (rd[i,j] + weight*sp[i,j]) / 2.0
+            
+    return result
+    
 @jit_safe()
 def compute_node_payoff(
     node: int,

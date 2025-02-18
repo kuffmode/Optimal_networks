@@ -333,7 +333,7 @@ def _compute_metrics_for_timepoint(timepoint,
     metrics[5] = calculate_wiring_cost(sim, euclidean_distance)
     metrics[6] = nx.average_clustering(G)
     metrics[7] = nx.degree_assortativity_coefficient(G)
-    metrics[8] = nx.smallworld.sigma(G)
+    # metrics[8] = nx.smallworld.sigma(G) this takes forever so not using it yet
     metrics[9] = calculate_endpoint_similarity(sim, empirical_adjmat).mean()
     metrics[10], metrics[11] = evaluate_adjacency(empirical_adjmat, sim)
     
