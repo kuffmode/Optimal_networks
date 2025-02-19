@@ -46,6 +46,26 @@ wheels = [
 ]
 
 [[package]]
+name = "brainspace"
+version = "0.1.20"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "nibabel" },
+    { name = "numpy", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "pandas" },
+    { name = "pillow" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+    { name = "vtk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/eb/59/e01bc9bb5a2b354d3b162b57f29b62e1294a93daabb0fb6113620864554b/brainspace-0.1.20.tar.gz", hash = "sha256:57c40ec747dbc3ddd2098e0dbb868b033e8c3ec64f1dab9862f653426df9df4e", size = 60429542 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/76/ff/e25022b8e912441972a13de0d051b9cd687932f6410fb4e17c82e834996a/brainspace-0.1.20-py3-none-any.whl", hash = "sha256:ea8c7a2f8c23e12f05c36fd1ba7db77bd35ca438cb286122c3b3920dc9be3efe", size = 60685985 },
+]
+
+[[package]]
 name = "certifi"
 version = "2025.1.31"
 source = { registry = "https://pypi.org/simple" }
@@ -710,6 +730,24 @@ wheels = [
 ]
 
 [[package]]
+name = "neuromaps"
+version = "0.0.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "matplotlib" },
+    { name = "nibabel" },
+    { name = "nilearn" },
+    { name = "numpy", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "scikit-learn" },
+    { name = "scipy" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/7b/61/49ce118a84941b06e6c8ad6fc14cae471f87ca16ab271da7fe2fc9cb767b/neuromaps-0.0.5.tar.gz", hash = "sha256:a85959088f419dd5ddeeaa7d79c9e3ed13c281c397c9d55275871435b1e9a6e2", size = 109618 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/8f/19/449248987253adcaa4836678438318b88d8f192ec138df4fb5b6c2f2c747/neuromaps-0.0.5-py3-none-any.whl", hash = "sha256:dc4613b8092fe254324c13e007a29c8afd5a1dddef7093b91eae7a9f172cd248", size = 101723 },
+]
+
+[[package]]
 name = "nibabel"
 version = "5.3.2"
 source = { registry = "https://pypi.org/simple" }
@@ -813,12 +851,14 @@ name = "optimal-networks"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
+    { name = "brainspace" },
     { name = "h5py" },
     { name = "ipykernel" },
     { name = "joblib" },
     { name = "matplotlib" },
     { name = "netneurotools" },
     { name = "networkx" },
+    { name = "neuromaps" },
     { name = "nilearn" },
     { name = "numba" },
     { name = "numpy", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
@@ -831,6 +871,7 @@ dependencies = [
     { name = "scipy" },
     { name = "seaborn" },
     { name = "statsmodels" },
+    { name = "surfplot" },
     { name = "tqdm" },
     { name = "tqdm-joblib" },
     { name = "vizman" },
@@ -838,12 +879,14 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
+    { name = "brainspace", specifier = ">=0.1.20" },
     { name = "h5py", specifier = ">=3.12.1" },
     { name = "ipykernel", specifier = ">=6.29.5" },
     { name = "joblib", specifier = ">=1.4.2" },
     { name = "matplotlib", specifier = ">=3.7.5" },
     { name = "netneurotools", specifier = ">=0.2.5" },
     { name = "networkx", specifier = ">=3.4.2" },
+    { name = "neuromaps", specifier = ">=0.0.5" },
     { name = "nilearn", specifier = "==0.11.1" },
     { name = "numba", specifier = ">=0.58.1" },
     { name = "numpy", specifier = ">=1.24.4" },
@@ -855,6 +898,7 @@ requires-dist = [
     { name = "scipy", specifier = ">=1.10.1" },
     { name = "seaborn", specifier = ">=0.13.2" },
     { name = "statsmodels", specifier = ">=0.14.4" },
+    { name = "surfplot", specifier = ">=0.2.0" },
     { name = "tqdm", specifier = ">=4.67.1" },
     { name = "tqdm-joblib", specifier = ">=0.0.4" },
     { name = "vizman", specifier = ">=0.2.2" },
@@ -1406,6 +1450,24 @@ wheels = [
 ]
 
 [[package]]
+name = "surfplot"
+version = "0.2.0"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "brainspace" },
+    { name = "matplotlib" },
+    { name = "nibabel" },
+    { name = "numpy", version = "1.24.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.12'" },
+    { name = "numpy", version = "1.26.4", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "scipy" },
+    { name = "vtk" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/d4/f8/1b74ddcb05764db182b1f468bcb8efb5548b8efe5f6e29be86c07d25cd8e/surfplot-0.2.0.tar.gz", hash = "sha256:1dd4ae3943860b1756f97e6acb10decc6e0411637a9d3ab4d365c4df99bb7bad", size = 72066 }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b1/17/440347ae24a38c78a9b116e0b80d91ee980ab88936a474546b7d2b5238c9/surfplot-0.2.0-py3-none-any.whl", hash = "sha256:cec0cc4283406898ef0c92e7c952dddc0f77993a8c05a6ceb9974a556a228ab8", size = 69762 },
+]
+
+[[package]]
 name = "threadpoolctl"
 version = "3.5.0"
 source = { registry = "https://pypi.org/simple" }
@@ -1503,6 +1565,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/84/d0/61a778f5865d3c3c4e73e3fdbe2f14390cf1533f6ddcd8aa12e01d6d8e9a/vizman-0.2.2.tar.gz", hash = "sha256:8f808d954771b3795e48736318769ba2804b9f3febe3efc83d4f6db8cdb38075", size = 1124663 }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/75/ca/f2e31280e625af303365f633dc5ba97d6fde4efc5afc0f48a4f38a235ad7/vizman-0.2.2-py3-none-any.whl", hash = "sha256:6a4301169baaea1624e92340b11ba03393da7e9ddd0c7b3d7092439aa2b298af", size = 1127802 },
+]
+
+[[package]]
+name = "vtk"
+version = "9.3.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "matplotlib" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/58/08/94e2d38ae35ebb85cad96cb11738208307341cac8b16e162ed95ccb26860/vtk-9.3.1-cp311-cp311-macosx_10_10_x86_64.whl", hash = "sha256:55e2df9e6993b959b482b79a6d68b8d46397b479d69738d41b1501396fcad50c", size = 76687738 },
+    { url = "https://files.pythonhosted.org/packages/35/36/357ba7a02bc07a4d0df075e5a213a02020d509b312222445a05e354f52ff/vtk-9.3.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:c977486b0e4d87cddb3f2c7c0710d1c86243cdd01286cbd036231143d8eb4f6e", size = 70350272 },
+    { url = "https://files.pythonhosted.org/packages/d0/f8/1517f4f755233bb77542c222b173c760908f8f8d4330fc72526c295ab1e7/vtk-9.3.1-cp311-cp311-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f8edc04e0f8b6719cfc769e575a777267d667f447d1948c62fa97fb756cd75bb", size = 92115989 },
+    { url = "https://files.pythonhosted.org/packages/7a/44/3797d3367180a38bb41e24a6735860d94d16351fbe12e3f6bf6efb8940c8/vtk-9.3.1-cp311-cp311-win_amd64.whl", hash = "sha256:59cc043f611e3eca2870cc50f27e67852a182857de322415e942bdc133594acd", size = 52526922 },
+    { url = "https://files.pythonhosted.org/packages/6f/ba/1571d61013f3f5778c11741d5de19db197b437d1a52215560f016662597b/vtk-9.3.1-cp312-cp312-macosx_10_10_x86_64.whl", hash = "sha256:05a4b6e387a906e8c8d6844441f9200116e937069fcf81f43e2600f26eb046de", size = 76832738 },
+    { url = "https://files.pythonhosted.org/packages/8e/75/c637c620d23ccecb8ddf58fdb80af1dc56ecdd60f3e018c55e041663398b/vtk-9.3.1-cp312-cp312-macosx_11_0_arm64.whl", hash = "sha256:bdbefb1aef9599a0a0b8222c9582f26946732a93534e6ec37d4b8e2c524c627e", size = 70385880 },
+    { url = "https://files.pythonhosted.org/packages/01/ee/730d57c6d7353c1afb919ceedfac387a190ccb92e611c4b14f88e6f39066/vtk-9.3.1-cp312-cp312-manylinux_2_17_x86_64.manylinux2014_x86_64.whl", hash = "sha256:f728bb61f43fce850d622ced3b3d51b3116f767685ca4e4e0076f624e2d2307d", size = 92159868 },
+    { url = "https://files.pythonhosted.org/packages/b1/34/b9b6de4009be2fe90919c4943ae99ae3d465ada73061e928d4744683f915/vtk-9.3.1-cp312-cp312-win_amd64.whl", hash = "sha256:685988e09070e06c8605886591698fd42d8225489509b6537a5046cd034cc93e", size = 52529544 },
 ]
 
 [[package]]

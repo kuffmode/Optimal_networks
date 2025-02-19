@@ -5,12 +5,14 @@ description = "connecting dots, but goodly"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
+    "brainspace>=0.1.20",
     "h5py>=3.12.1",
     "ipykernel>=6.29.5",
     "joblib>=1.4.2",
     "matplotlib>=3.7.5",
     "netneurotools>=0.2.5",
     "networkx>=3.4.2",
+    "neuromaps>=0.0.5",
     "nilearn==0.11.1",
     "numba>=0.58.1",
     "numpy>=1.24.4",
@@ -22,6 +24,7 @@ dependencies = [
     "scipy>=1.10.1",
     "seaborn>=0.13.2",
     "statsmodels>=0.14.4",
+    "surfplot>=0.2.0",
     "tqdm>=4.67.1",
     "tqdm-joblib>=0.0.4",
     "vizman>=0.2.2",
