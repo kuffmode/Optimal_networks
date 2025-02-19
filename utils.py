@@ -16,6 +16,7 @@ from tqdm_joblib import tqdm_joblib
 from sklearn.metrics.pairwise import cosine_similarity
 from generative import resistance_distance, shortest_path_distance, propagation_distance, topological_distance
 import pandas as pd
+import bct
 
 def evaluator(synthetic, empirical, euclidean_distance):
     degrees_synthetic = np.sum(synthetic, axis=0)
@@ -275,6 +276,123 @@ def evaluate_adjacency(empirical_adj, simulated_adj):
 
     return accuracy, f1
 
+def randomize_graph(G, nswap=None, max_tries=None):
+    """Randomizes the graph using double edge swap."""
+    if nswap is None:
+        nswap = 20 * G.number_of_edges()  # Adjust as needed
+    if max_tries is None:
+        max_tries = nswap * 20
+    G_random = nx.double_edge_swap(G.copy(), nswap=nswap, max_tries=max_tries)
+    return G_random
+
+def compute_random_metrics(G, nrandomizations=10, nswap=None, max_tries=None):
+    """
+    Computes the average clustering and average shortest path length over multiple randomized versions
+    of the input graph.
+    """
+    clustering_vals = []
+    path_length_vals = []
+    
+    for _ in range(nrandomizations):
+        Gr = randomize_graph(G, nswap, max_tries)
+        clustering_vals.append(nx.average_clustering(Gr))
+        try:
+            path_length_vals.append(nx.average_shortest_path_length(Gr))
+        except nx.NetworkXError:
+            # In case the randomized graph is disconnected, compute the metric for the largest connected component.
+            largest_cc = max(nx.connected_components(Gr), key=len)
+            Gr_sub = Gr.subgraph(largest_cc)
+            path_length_vals.append(nx.average_shortest_path_length(Gr_sub))
+    
+    return np.mean(clustering_vals), np.mean(path_length_vals)
+
+def compute_sigma(adj_matrix, nrandomizations=32, nswap=None, max_tries=None):
+    """
+    Computes the smallworld index sigma for a graph given its adjacency matrix.
+    
+    Sigma is defined as:
+        sigma = (C / C_rand) / (L / L_rand)
+    where:
+        C      = average clustering coefficient of the graph
+        L      = characteristic path length of the graph
+        C_rand = average clustering coefficient of randomized graphs
+        L_rand = average characteristic path length of randomized graphs
+    """
+    # Create graph from adjacency matrix
+    G = nx.from_numpy_array(adj_matrix)
+    
+    # Compute original graph metrics
+    C = nx.average_clustering(G)
+    try:
+        L = nx.average_shortest_path_length(G)
+    except nx.NetworkXError:
+        # For disconnected graphs, compute L on the largest connected component.
+        largest_cc = max(nx.connected_components(G), key=len)
+        G_sub = G.subgraph(largest_cc)
+        L = nx.average_shortest_path_length(G_sub)
+    
+    # Compute metrics for randomized graphs
+    Crand, Lrand = compute_random_metrics(G, nrandomizations, nswap, max_tries)
+    
+    # Calculate and return sigma
+    sigma = (C / Crand) / (L / Lrand)
+    return sigma
+
+def compute_omega(adj_matrix, nrandomizations=100, nswap=None, max_tries=None):
+    """
+    Computes the omega (ω) small-world metric for an undirected network given its adjacency matrix.
+    
+    ω is defined as:
+        ω = (L_rand / L) - (C / C_latt)
+    
+    where:
+        L     = average shortest path length of the original graph
+        C     = average clustering coefficient of the original graph
+        L_rand = average shortest path length of a randomized version of the graph (averaged over multiple realizations)
+        C_latt = clustering coefficient of a lattice (regular) graph generated to approximate the equivalent lattice
+    
+    Parameters:
+        adj_matrix (numpy.ndarray): The adjacency matrix.
+        nrandomizations (int): Number of random networks to average for L_rand.
+        nswap, max_tries: Parameters passed to the double edge swap (randomization).
+    
+    Returns:
+        omega (float): The small-world omega metric.
+    """
+    # Create the original graph from the adjacency matrix
+    G = nx.from_numpy_array(adj_matrix)
+    n = G.number_of_nodes()
+    
+    # Compute clustering (C) and path length (L) for the original network.
+    C = nx.average_clustering(G)
+    try:
+        L = nx.average_shortest_path_length(G)
+    except nx.NetworkXError:
+        # If the graph is disconnected, use the largest connected component.
+        largest_cc = max(nx.connected_components(G), key=len)
+        G_sub = G.subgraph(largest_cc)
+        L = nx.average_shortest_path_length(G_sub)
+    
+    # Compute L_rand: average shortest path length of randomized networks.
+    L_rand_values = []
+    for _ in range(nrandomizations):
+        Gr = randomize_graph(G, nswap, max_tries)
+        try:
+            L_rand_values.append(nx.average_shortest_path_length(Gr))
+        except nx.NetworkXError:
+            # Use the largest connected component if Gr is disconnected.
+            largest_cc = max(nx.connected_components(Gr), key=len)
+            Gr_sub = Gr.subgraph(largest_cc)
+            L_rand_values.append(nx.average_shortest_path_length(Gr_sub))
+    L_rand = np.mean(L_rand_values)
+    
+    laticized = bct.latmio_und(adj_matrix,itr=100)[0]
+    G_lattice = nx.from_numpy_array(laticized)
+    C_latt = nx.average_clustering(G_lattice)
+    
+    # Compute omega according to the formula.
+    omega = (L_rand / L) - (C / C_latt)
+    return omega
 
 def compute_graph_metrics(simulated_tensor,
                           empirical_adjmat,
@@ -333,7 +451,7 @@ def _compute_metrics_for_timepoint(timepoint,
     metrics[5] = calculate_wiring_cost(sim, euclidean_distance)
     metrics[6] = nx.average_clustering(G)
     metrics[7] = nx.degree_assortativity_coefficient(G)
-    # metrics[8] = nx.smallworld.sigma(G) this takes forever so not using it yet
+    metrics[8] = compute_omega(sim)
     metrics[9] = calculate_endpoint_similarity(sim, empirical_adjmat).mean()
     metrics[10], metrics[11] = evaluate_adjacency(empirical_adjmat, sim)
     
