@@ -213,15 +213,17 @@ def fast_evaluator(synthetic: np.ndarray,
     return results
 
 @njit
-def density_distance(final_network, empirical):
+def density_distance(final_network, empirical, absolute=True):
     # Compute synthetic network density
     density_synthetic = np.sum(final_network) / (final_network.shape[0] * final_network.shape[0])
     
     # Compute empirical network density
     density_empirical = np.sum(empirical) / (empirical.shape[0] * empirical.shape[0])
     
-    # Return absolute difference
-    return abs(density_synthetic - density_empirical)
+    if absolute:
+        return np.abs(density_synthetic - density_empirical)
+    else:
+        return density_synthetic - density_empirical
 
 def check_density(adj):
     return np.sum(adj)/(adj.shape[0] * (adj.shape[0]-1))
