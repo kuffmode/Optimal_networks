@@ -18,6 +18,7 @@ from sklearn.metrics.pairwise import cosine_similarity
 from generative import resistance_distance, shortest_path_distance, propagation_distance, topological_distance
 import pandas as pd
 import bct
+from sklearn.decomposition import PCA
 
 def evaluator(synthetic, empirical, euclidean_distance):
     degrees_synthetic = np.sum(synthetic, axis=0)
@@ -706,3 +707,275 @@ def brain_plotter(
     scaling = np.array([axis.get_xlim(), axis.get_ylim(), axis.get_zlim()])
     axis.set_box_aspect(tuple(scaling[:, 1] / 1.2 - scaling[:, 0]))
     return axis
+
+
+def calculate_trajectories(
+    adjacency_tensors_list: List[np.ndarray]
+) -> Tuple[List[np.ndarray], PCA]:
+    """
+    Create PCA embeddings from multiple network evolution trajectories with variable lengths.
+    
+    Parameters
+    ----------
+    adjacency_tensors_list : List[np.ndarray]
+        List of binary adjacency tensors, each with shape (n_nodes, n_nodes, n_timepoints_i)
+        where n_timepoints_i can vary between tensors
+    
+    Returns
+    -------
+    List[np.ndarray]
+        List of low-dimensional embeddings, each with shape (n_timepoints_i, n_components)
+    PCA
+        Fitted PCA object for reference
+    """
+    n_nodes = adjacency_tensors_list[0].shape[0]  # Assuming same number of nodes
+    
+    # Extract upper triangular indices (without diagonal)
+    triu_indices = np.triu_indices(n_nodes, k=1)
+    
+    # Flatten all matrices into vectors (only upper triangle)
+    flat_matrices = []
+    trajectory_lengths = []
+    
+    for rule_idx, adj_tensor in enumerate(adjacency_tensors_list):
+        n_timepoints = adj_tensor.shape[2]
+        trajectory_lengths.append(n_timepoints)
+        
+        for time in range(n_timepoints):
+            # Extract upper triangle at this time point
+            flat_matrices.append(adj_tensor[triu_indices[0], triu_indices[1], time])
+    
+    # Convert to array for PCA
+    X = np.array(flat_matrices)
+    
+    # Apply PCA
+    pca = PCA(n_components=3)  # Can adjust number of components
+    X_reduced = pca.fit_transform(X)
+    
+    # Split back into separate trajectories
+    embeddings_list = []
+    start_idx = 0
+    
+    for length in trajectory_lengths:
+        end_idx = start_idx + length
+        embeddings_list.append(X_reduced[start_idx:end_idx])
+        start_idx = end_idx
+    
+    return embeddings_list, pca
+
+def process_labels(source_labels: List[str], 
+                  gifti_labels_rh: Dict[int, str], 
+                  gifti_labels_lh: Dict[int, str]) -> Tuple[Dict[str, int], np.ndarray]:
+    """
+    Map source labels to gifti label indices, handling duplicates and hemispheres.
+    
+    Parameters:
+    -----------
+    source_labels : List[str]
+        List of labels like 'rh_lateralorbitofrontal', 'lh_precentral', etc.
+    gifti_labels_rh : Dict[int, str]
+        Right hemisphere gifti labels dictionary
+    gifti_labels_lh : Dict[int, str]
+        Left hemisphere gifti labels dictionary
+        
+    Returns:
+    --------
+    label_mapping : Dict[str, int]
+        Mapping from source labels to their positions in the new organization
+    mask : np.ndarray
+        Boolean mask for valid positions
+    """
+    # Initialize mapping dictionary
+    label_mapping = {}
+    
+    # Create reverse lookup dictionaries for gifti labels
+    rh_lookup = {}  # base_name -> list of indices
+    lh_lookup = {}  # base_name -> list of indices
+    
+    # Process right hemisphere gifti labels
+    for idx, label in gifti_labels_rh.items():
+        if label != '???' and label != 'corpuscallosum':
+            base_name = label.rsplit('_', 1)[0]  # Split on last underscore
+            if base_name not in rh_lookup:
+                rh_lookup[base_name] = []
+            rh_lookup[base_name].append(idx)
+            
+    # Process left hemisphere gifti labels
+    offset = len(gifti_labels_rh)  # Offset for left hemisphere indices
+    for idx, label in gifti_labels_lh.items():
+        if label != '???' and label != 'corpuscallosum':
+            base_name = label.rsplit('_', 1)[0]  # Split on last underscore
+            if base_name not in lh_lookup:
+                lh_lookup[base_name] = []
+            lh_lookup[base_name].append(idx + offset)
+    
+    # Counter for duplicate regions
+    rh_counter = {k: 0 for k in rh_lookup.keys()}
+    lh_counter = {k: 0 for k in lh_lookup.keys()}
+    
+    # Process source labels
+    for label in source_labels:
+        hemi, region = label.split('_', 1)  # Split on first underscore
+        
+        if hemi == 'rh':
+            if region in rh_lookup:
+                # Get next available index for this region
+                if rh_counter[region] < len(rh_lookup[region]):
+                    idx = rh_lookup[region][rh_counter[region]]
+                    label_mapping[label] = idx
+                    rh_counter[region] += 1
+                
+        elif hemi == 'lh':
+            if region in lh_lookup:
+                # Get next available index for this region
+                if lh_counter[region] < len(lh_lookup[region]):
+                    idx = lh_lookup[region][lh_counter[region]]
+                    label_mapping[label] = idx
+                    lh_counter[region] += 1
+    
+    # Create mask for valid positions
+    total_length = len(gifti_labels_rh) + len(gifti_labels_lh)
+    mask = np.zeros(total_length, dtype=bool)
+    for idx in label_mapping.values():
+        mask[idx] = True
+        
+    return label_mapping, mask
+
+
+
+from collections import defaultdict
+
+def enumerate_source_labels(source_labels: list) -> list:
+    """
+    Enumerate duplicate labels in the source list similar to gifti format.
+    
+    Parameters:
+    -----------
+    source_labels : list
+        Original list of labels (e.g., ['rh_precentral', 'rh_precentral', ...])
+    
+    Returns:
+    --------
+    list
+        Enumerated labels (e.g., ['rh_precentral_1', 'rh_precentral_2', ...])
+    """
+    # Keep track of counts for each base label
+    counter = defaultdict(int)
+    enumerated_labels = []
+    
+    for label in source_labels:
+        counter[label] += 1
+        enumerated_labels.append(f"{label}_{counter[label]}")
+        
+    return enumerated_labels
+
+def reorganize_data_with_labels(data: np.ndarray, 
+                              source_labels: List[str],
+                              gifti_labels_rh: Dict[int, str],
+                              gifti_labels_lh: Dict[int, str]) -> pd.DataFrame:
+    """
+    Reorganize data (matrix or vector) using pandas DataFrames and label matching.
+    
+    Parameters:
+    -----------
+    data : np.ndarray
+        Original data, either a matrix (114x114) or vector (114,)
+    source_labels : List[str]
+        Original list of labels (rh_region and lh_region format)
+    gifti_labels_rh : Dict[int, str]
+        Right hemisphere gifti labels dictionary
+    gifti_labels_lh : Dict[int, str]
+        Left hemisphere gifti labels dictionary
+    
+    Returns:
+    --------
+    pd.DataFrame
+        Reorganized data with zeros for missing regions
+    """
+    # Check if input is vector or matrix
+    is_vector = data.ndim == 1 or (data.ndim == 2 and data.shape[1] == 1)
+    
+    # First enumerate the source labels
+    enumerated_source_labels = enumerate_source_labels(source_labels)
+    
+    # Create the source DataFrame with enumerated labels
+    if is_vector:
+        df_source = pd.DataFrame(data, 
+                               index=enumerated_source_labels,
+                               columns=['value'],
+                               dtype=data.dtype)
+    else:
+        df_source = pd.DataFrame(data, 
+                               index=enumerated_source_labels,
+                               columns=enumerated_source_labels,
+                               dtype=data.dtype)
+    
+    # Create the full list of target labels in gifti order
+    target_labels = []
+    
+    # Add RH labels preserving original gifti format
+    for i in range(len(gifti_labels_rh)):
+        target_labels.append(
+            f"rh_{gifti_labels_rh[i]}" if gifti_labels_rh[i] != '???' 
+            else gifti_labels_rh[i]
+        )
+    
+    # Add LH labels preserving original gifti format
+    for i in range(len(gifti_labels_lh)):
+        target_labels.append(
+            f"lh_{gifti_labels_lh[i]}" if gifti_labels_lh[i] != '???' 
+            else gifti_labels_lh[i]
+        )
+    
+    # Create empty target DataFrame
+    if is_vector:
+        df_target = pd.DataFrame(0, 
+                               index=target_labels,
+                               columns=['value'],
+                               dtype=data.dtype)
+    else:
+        df_target = pd.DataFrame(0, 
+                               index=target_labels,
+                               columns=target_labels,
+                               dtype=data.dtype)
+    
+    # Create mapping between source and target labels
+    source_to_target = {}
+    for source_label in enumerated_source_labels:
+        # Split into components (e.g., 'rh_precentral_1' -> ['rh', 'precentral', '1'])
+        hemi, region, num = source_label.rsplit('_', 1)[0].split('_', 1)[0], \
+                           source_label.rsplit('_', 1)[0].split('_', 1)[1], \
+                           source_label.rsplit('_', 1)[1]
+        
+        # Find matching target label
+        target_base = f"{hemi}_{region}_{num}"
+        matching_targets = [t for t in target_labels 
+                          if t != '???' and t.startswith(f"{hemi}_{region}_")]
+        
+        if matching_targets:
+            # Map to the corresponding numbered version
+            try:
+                source_to_target[source_label] = matching_targets[int(num) - 1]
+            except IndexError:
+                # If there aren't enough target labels, map to the last available one
+                source_to_target[source_label] = matching_targets[-1]
+    
+    # Fill the target DataFrame with values from source
+    if is_vector:
+        for source_label, target_label in source_to_target.items():
+            df_target.loc[target_label, 'value'] = df_source.loc[source_label, 'value']
+    else:
+        for source_i, target_i in source_to_target.items():
+            for source_j, target_j in source_to_target.items():
+                df_target.loc[target_i, target_j] = df_source.loc[source_i, source_j]
+    
+    return df_target
+
+def data_to_surfdata(left_data, right_data, lh_surfaces, rh_surfaces):
+    label_to_data = dict(enumerate(left_data.values.flatten()))
+    left_surfdata = np.array([label_to_data.get(label, 0) for label in lh_surfaces])
+
+    label_to_data = dict(enumerate(right_data.values.flatten()))
+    right_surfdata = np.array([label_to_data.get(label, 0) for label in rh_surfaces])
+
+    return left_surfdata, right_surfdata

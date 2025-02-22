@@ -29,3 +29,10 @@ dependencies = [
     "tqdm-joblib>=0.0.4",
     "vizman>=0.2.2",
 ]
+
+[tool.uv]
+dev-dependencies = [
+    "ipykernel>=6.29.5",
+    "jupyter>=1.1.1",
+    "notebook>=7.3.2",
+]
