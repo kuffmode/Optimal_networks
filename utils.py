@@ -19,6 +19,8 @@ from generative import resistance_distance, shortest_path_distance, propagation_
 import pandas as pd
 import bct
 from sklearn.decomposition import PCA
+from collections import defaultdict
+
 
 def evaluator(synthetic, empirical, euclidean_distance):
     degrees_synthetic = np.sum(synthetic, axis=0)
@@ -708,60 +710,143 @@ def brain_plotter(
     axis.set_box_aspect(tuple(scaling[:, 1] / 1.2 - scaling[:, 0]))
     return axis
 
-
 def calculate_trajectories(
-    adjacency_tensors_list: List[np.ndarray]
-) -> Tuple[List[np.ndarray], PCA]:
+    simulation_tensors_list: List[np.ndarray],
+    empirical_tensor: np.ndarray,
+    n_components: int = 3,
+    use_all_empirical: bool = True,
+    empirical_indices: Optional[np.ndarray] = None
+) -> Tuple[Dict[int, np.ndarray], np.ndarray, PCA]:
     """
-    Create PCA embeddings from multiple network evolution trajectories with variable lengths.
+    Create joint PCA embeddings for multiple simulation rule trajectories and empirical data.
     
     Parameters
     ----------
-    adjacency_tensors_list : List[np.ndarray]
-        List of binary adjacency tensors, each with shape (n_nodes, n_nodes, n_timepoints_i)
-        where n_timepoints_i can vary between tensors
-    
+    simulation_tensors_list : List[np.ndarray]
+        List of binary adjacency tensors for different simulation rules,
+        each with shape (n_nodes, n_nodes, n_timepoints_i, n_sim_samples)
+    empirical_tensor : np.ndarray
+        Binary adjacency tensor with shape (n_nodes, n_nodes, n_emp_samples)
+        where n_emp_samples may be different from n_sim_samples
+    n_components : int, default=3
+        Number of PCA components to use
+    use_all_empirical : bool, default=True
+        If True, use all empirical samples in the embedding
+        If False, use only a subset matching the number of simulation samples
+    empirical_indices : np.ndarray, optional
+        Indices of empirical samples to use when use_all_empirical=False
+        If None and use_all_empirical=False, uses first n_sim_samples
+        
     Returns
     -------
-    List[np.ndarray]
-        List of low-dimensional embeddings, each with shape (n_timepoints_i, n_components)
+    Dict[int, np.ndarray]
+        Dictionary mapping rule indices to their embeddings
+        Each embedding has shape (n_sim_samples, n_timepoints_i, n_components)
+    np.ndarray
+        Empirical embeddings with shape (n_used_emp_samples, n_components)
+        where n_used_emp_samples is either n_emp_samples or n_sim_samples
     PCA
         Fitted PCA object for reference
     """
-    n_nodes = adjacency_tensors_list[0].shape[0]  # Assuming same number of nodes
+    n_nodes = simulation_tensors_list[0].shape[0]  # Assuming same number of nodes
+    n_sim_samples = simulation_tensors_list[0].shape[3]  # Number of simulation samples
+    n_emp_samples = empirical_tensor.shape[2]  # Number of empirical samples
     
+    # Check consistency in simulation tensors
+    for i, tensor in enumerate(simulation_tensors_list):
+        if tensor.shape[0] != n_nodes or tensor.shape[1] != n_nodes:
+            raise ValueError(f"Simulation tensor {i} has inconsistent node dimensions")
+        if tensor.shape[3] != n_sim_samples:
+            raise ValueError(f"Simulation tensor {i} has inconsistent number of samples")
+    
+    # Determine which empirical samples to use
+    if use_all_empirical:
+        emp_indices = np.arange(n_emp_samples)
+    else:
+        if empirical_indices is not None:
+            emp_indices = empirical_indices
+            if len(emp_indices) != n_sim_samples:
+                raise ValueError("Number of specified empirical indices must match simulation samples")
+        else:
+            # Use first n_sim_samples by default
+            if n_sim_samples > n_emp_samples:
+                raise ValueError("Not enough empirical samples to match simulation samples")
+            emp_indices = np.arange(n_sim_samples)
+    
+    n_used_emp_samples = len(emp_indices)
+            
     # Extract upper triangular indices (without diagonal)
     triu_indices = np.triu_indices(n_nodes, k=1)
     
-    # Flatten all matrices into vectors (only upper triangle)
+    # Flatten matrices into vectors (only upper triangle)
     flat_matrices = []
-    trajectory_lengths = []
     
-    for rule_idx, adj_tensor in enumerate(adjacency_tensors_list):
-        n_timepoints = adj_tensor.shape[2]
-        trajectory_lengths.append(n_timepoints)
+    # Keep track of trajectory info for reconstruction
+    rule_trajectory_info = []
+    
+    # Process each simulation rule
+    for rule_idx, sim_tensor in enumerate(simulation_tensors_list):
+        n_timepoints = sim_tensor.shape[2]
         
-        for time in range(n_timepoints):
-            # Extract upper triangle at this time point
-            flat_matrices.append(adj_tensor[triu_indices[0], triu_indices[1], time])
+        # Store info for reconstruction
+        rule_trajectory_info.append({
+            'rule_idx': rule_idx,
+            'n_timepoints': n_timepoints,
+            'start_idx': len(flat_matrices)
+        })
+        
+        # Process simulation tensor for this rule - all samples
+        for sample in range(n_sim_samples):
+            for time in range(n_timepoints):
+                # Extract upper triangle at this time point for this sample
+                flat_matrices.append(
+                    sim_tensor[triu_indices[0], triu_indices[1], time, sample]
+                )
+    
+    # Store starting index for empirical data
+    empirical_start_idx = len(flat_matrices)
+    
+    # Process empirical tensor - selected samples
+    for emp_idx in emp_indices:
+        # Extract upper triangle for this sample
+        flat_matrices.append(
+            empirical_tensor[triu_indices[0], triu_indices[1], emp_idx]
+        )
     
     # Convert to array for PCA
     X = np.array(flat_matrices)
     
     # Apply PCA
-    pca = PCA(n_components=3)  # Can adjust number of components
+    pca = PCA(n_components=n_components)
     X_reduced = pca.fit_transform(X)
     
     # Split back into separate trajectories
-    embeddings_list = []
-    start_idx = 0
+    simulation_embeddings = {}
+    empirical_embeddings = np.zeros((n_used_emp_samples, n_components))
     
-    for length in trajectory_lengths:
-        end_idx = start_idx + length
-        embeddings_list.append(X_reduced[start_idx:end_idx])
-        start_idx = end_idx
+    # Extract simulation embeddings for each rule
+    for rule_info in rule_trajectory_info:
+        rule_idx = rule_info['rule_idx']
+        n_timepoints = rule_info['n_timepoints']
+        start_idx = rule_info['start_idx']
+        
+        # Initialize embeddings for this rule - shape (n_sim_samples, n_timepoints, n_components)
+        rule_embeddings = np.zeros((n_sim_samples, n_timepoints, n_components))
+        
+        # Extract embeddings for each sample
+        for sample in range(n_sim_samples):
+            sample_start = start_idx + sample * n_timepoints
+            sample_end = sample_start + n_timepoints
+            rule_embeddings[sample] = X_reduced[sample_start:sample_end]
+        
+        simulation_embeddings[rule_idx] = rule_embeddings
     
-    return embeddings_list, pca
+    # Extract empirical embeddings
+    for i, emp_idx in enumerate(emp_indices):
+        idx = empirical_start_idx + i
+        empirical_embeddings[i] = X_reduced[idx]
+    
+    return simulation_embeddings, empirical_embeddings, pca
 
 def process_labels(source_labels: List[str], 
                   gifti_labels_rh: Dict[int, str], 
@@ -841,9 +926,6 @@ def process_labels(source_labels: List[str],
         
     return label_mapping, mask
 
-
-
-from collections import defaultdict
 
 def enumerate_source_labels(source_labels: list) -> list:
     """
