@@ -490,7 +490,7 @@ def normalized_propagation_distance(adjacency_matrix, coordinates, alpha=0.1, ep
             
     return normalized_distance
 
-@njit
+@jit_safe()
 def resistance_distance(adjacency: FloatArray, coordinates: FloatArray) -> FloatArray:
     """
     Compute resistance distances between all pairs of nodes.
