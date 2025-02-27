@@ -279,6 +279,217 @@ def propagation_distance(adjacency_matrix, coordinates=None, alpha=0.8, eps=1e-1
     # Compute distance
     return process_matrix(np.abs(-np.log(prop_matrix)))
 
+@jit_safe()
+def weighted_propagation_distance(adjacency_matrix, coordinates, alpha=0.8, eps=1e-10):
+    """
+    Computes the propagation distance matrix using weights based on Euclidean distances:
+        -log((I - α*W)^{-1} * (I - α*W)^{-1}.T)
+    
+    Where W is the adjacency matrix weighted by inverse Euclidean distances.
+    
+    Parameters
+    ----------
+    adjacency_matrix : np.ndarray
+        A square binary adjacency matrix.
+    coordinates : np.ndarray
+        Node coordinates (n_nodes, n_dimensions) used for edge weighting.
+    alpha : float, optional
+        Scaling factor for the adjacency matrix (default: 0.8).
+    eps : float, optional
+        Small constant to ensure numerical stability (default: 1e-10).
+    
+    Returns
+    -------
+    dist : np.ndarray
+        The elementwise -log of the propagation matrix.
+    """
+    N = adjacency_matrix.shape[0]
+    
+    # Create weighted adjacency matrix using inverse Euclidean distances
+    W = np.zeros((N, N), dtype=np.float64)
+    
+    for i in range(N):
+        for j in range(N):
+            if adjacency_matrix[i, j] > 0:
+                # Calculate Euclidean distance between nodes
+                dist = 0.0
+                for d in range(coordinates.shape[1]):
+                    dist += (coordinates[i, d] - coordinates[j, d])**2
+                dist = np.sqrt(dist) + 1e-12  # Avoid division by zero
+                
+                # Use inverse distance as weight (same as resistance distance)
+                W[i, j] = 1.0 / dist
+    
+    # Normalize weighted adjacency matrix by spectral radius
+    # This is a simple approximation to avoid computing eigenvalues in numba
+    row_sums = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            row_sums[i] += W[i, j]
+    
+    max_sum = 0.0
+    for i in range(N):
+        if row_sums[i] > max_sum:
+            max_sum = row_sums[i]
+    
+    if max_sum > eps:
+        for i in range(N):
+            for j in range(N):
+                W[i, j] /= max_sum
+    
+    # Compute M = I - α*W
+    M = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                M[i, j] = 1.0 - alpha * W[i, j]
+            else:
+                M[i, j] = -alpha * W[i, j]
+    
+    # Compute inverse of M
+    M_inv = np.linalg.inv(M)
+    
+    # Compute propagation matrix M_inv * M_inv.T
+    prop_matrix = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            for k in range(N):
+                prop_matrix[i, j] += M_inv[i, k] * M_inv[j, k]
+    
+    # Set diagonal to eps and ensure positivity
+    for i in range(N):
+        prop_matrix[i, i] = 0.0
+        for j in range(N):
+            if i != j and prop_matrix[i, j] < eps:
+                prop_matrix[i, j] = eps
+    
+    # Compute distance as -log(prop_matrix)
+    result = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                result[i, j] = 0.0
+            else:
+                result[i, j] = -np.log(prop_matrix[i, j])
+    
+    return process_matrix(result)
+
+@jit_safe()
+def normalized_propagation_distance(adjacency_matrix, coordinates, alpha=0.1, eps=1e-10):
+    """
+    Computes the propagation distance matrix and then normalizes
+    the resulting distance matrix based on node strengths.
+    
+    Parameters
+    ----------
+    adjacency_matrix : np.ndarray
+        A square binary adjacency matrix.
+    coordinates : np.ndarray
+        Node coordinates (n_nodes, n_dimensions) used for edge weighting.
+    alpha : float, optional
+        Scaling factor for the adjacency matrix (default: 0.8).
+    eps : float, optional
+        Small constant to ensure numerical stability (default: 1e-10).
+    
+    Returns
+    -------
+    dist : np.ndarray
+        The normalized propagation distance matrix.
+    """
+    N = adjacency_matrix.shape[0]
+    
+    # Create weighted adjacency matrix using inverse Euclidean distances
+    W = np.zeros((N, N), dtype=np.float64)
+    
+    for i in range(N):
+        for j in range(N):
+            if adjacency_matrix[i, j] > 0:
+                # Calculate Euclidean distance between nodes
+                dist = 0.0
+                for d in range(coordinates.shape[1]):
+                    dist += (coordinates[i, d] - coordinates[j, d])**2
+                dist = np.sqrt(dist) + 1e-12  # Avoid division by zero
+                
+                # Use inverse distance as weight (same as resistance distance)
+                W[i, j] = 1.0 / dist
+    
+    # Normalize weighted adjacency matrix by spectral radius
+    # This is a simple approximation to avoid computing eigenvalues in numba
+    row_sums = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            row_sums[i] += W[i, j]
+    
+    max_sum = 0.0
+    for i in range(N):
+        if row_sums[i] > max_sum:
+            max_sum = row_sums[i]
+    
+    if max_sum > eps:
+        for i in range(N):
+            for j in range(N):
+                W[i, j] /= max_sum
+    
+    # Compute M = I - α*W
+    M = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                M[i, j] = 1.0 - alpha * W[i, j]
+            else:
+                M[i, j] = -alpha * W[i, j]
+    
+    # Compute inverse of M
+    M_inv = np.linalg.inv(M)
+    
+    # Compute propagation matrix M_inv * M_inv.T
+    prop_matrix = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            for k in range(N):
+                prop_matrix[i, j] += M_inv[i, k] * M_inv[j, k]
+    
+    # Set diagonal to eps and ensure positivity
+    for i in range(N):
+        prop_matrix[i, i] = 0.0
+        for j in range(N):
+            if i != j and prop_matrix[i, j] < eps:
+                prop_matrix[i, j] = eps
+    
+    # Compute propagation distance as -log(prop_matrix)
+    prop_distance = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                prop_distance[i, j] = 0.0
+            else:
+                prop_distance[i, j] = -np.log(prop_matrix[i, j])
+    
+    # Process the matrix to handle inf and nan values
+    distance_matrix = process_matrix(prop_distance)
+    
+    # Calculate node strengths for normalization (using the original weighted adjacency)
+    strength = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            strength[i] += W[i, j]
+    
+    # Compute normalized strength (power -0.5)
+    normalized_strength = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        if strength[i] > 1e-12:  # Avoid division by zero
+            normalized_strength[i] = 1.0 / np.sqrt(strength[i])
+        else:
+            normalized_strength[i] = 0.0
+    
+    # Apply normalization to distance matrix
+    normalized_distance = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            normalized_distance[i, j] = normalized_strength[i] * distance_matrix[i, j] * normalized_strength[j]
+            
+    return normalized_distance
+
 @njit
 def resistance_distance(adjacency: FloatArray, coordinates: FloatArray) -> FloatArray:
     """
@@ -327,6 +538,388 @@ def resistance_distance(adjacency: FloatArray, coordinates: FloatArray) -> Float
     return resistance
 
 @jit_safe()
+def normalized_resistance_distance(adjacency_matrix, coordinates):
+    """
+    Compute resistance distances between all pairs of nodes and normalize
+    the resulting distance matrix based on node strengths.
+    
+    Parameters
+    ----------
+    adjacency_matrix : np.ndarray
+        Binary or weighted adjacency matrix (n_nodes, n_nodes)
+    coordinates : np.ndarray
+        Node coordinates (n_nodes, n_dimensions) used for edge weighting
+            
+    Returns
+    -------
+    np.ndarray
+        Matrix of normalized resistance distances (n_nodes, n_nodes)
+    """
+    n_nodes = adjacency_matrix.shape[0]
+    
+    # Create weighted adjacency matrix using inverse Euclidean distances
+    W = np.zeros((n_nodes, n_nodes), dtype=np.float64)
+    
+    for i in range(n_nodes):
+        for j in range(n_nodes):
+            if adjacency_matrix[i, j] > 0:
+                # Calculate Euclidean distance between nodes
+                dist = 0.0
+                for d in range(coordinates.shape[1]):
+                    dist += (coordinates[i, d] - coordinates[j, d])**2
+                dist = np.sqrt(dist) + 1e-12  # Avoid division by zero
+                
+                # Use inverse distance as weight
+                W[i, j] = 1.0 / dist
+    
+    # Compute weighted Laplacian
+    diag = np.zeros(n_nodes, dtype=np.float64)
+    for i in range(n_nodes):
+        for j in range(n_nodes):
+            diag[i] += W[i, j]
+    
+    laplacian = np.zeros((n_nodes, n_nodes), dtype=np.float64)
+    for i in range(n_nodes):
+        laplacian[i, i] = diag[i]
+        for j in range(n_nodes):
+            laplacian[i, j] -= W[i, j]
+    
+    # Compute pseudoinverse using eigendecomposition
+    eigvals, eigvecs = np.linalg.eigh(laplacian)
+    
+    # Filter out numerical zeros
+    L_plus = np.zeros((n_nodes, n_nodes), dtype=np.float64)
+    for k in range(n_nodes):
+        if eigvals[k] > 1e-10:  # Only use non-zero eigenvalues
+            for i in range(n_nodes):
+                for j in range(n_nodes):
+                    L_plus[i, j] += (eigvecs[i, k] * eigvecs[j, k]) / eigvals[k]
+    
+    # Compute resistance distances
+    resistance = np.zeros((n_nodes, n_nodes), dtype=np.float64)
+    for i in range(n_nodes):
+        for j in range(i, n_nodes):  # Compute upper triangle only
+            if i == j:
+                resistance[i, j] = 0.0
+            else:
+                r = L_plus[i, i] + L_plus[j, j] - 2.0 * L_plus[i, j]
+                resistance[i, j] = r
+                resistance[j, i] = r  # Fill lower triangle (symmetric)
+    
+    # Now normalize the resistance distance matrix using node strengths
+    # Calculate node strengths (sum of weights per row)
+    strength = np.zeros(n_nodes, dtype=np.float64)
+    for i in range(n_nodes):
+        for j in range(n_nodes):
+            strength[i] += W[i, j]
+    
+    # Compute normalized strength (power -0.5)
+    normalized_strength = np.zeros(n_nodes, dtype=np.float64)
+    for i in range(n_nodes):
+        if strength[i] > 1e-12:  # Avoid division by zero
+            normalized_strength[i] = 1.0 / np.sqrt(strength[i])
+        else:
+            normalized_strength[i] = 0.0
+    
+    # Apply normalization to resistance matrix
+    normalized_resistance = np.zeros((n_nodes, n_nodes), dtype=np.float64)
+    for i in range(n_nodes):
+        for j in range(n_nodes):
+            normalized_resistance[i, j] = normalized_strength[i] * resistance[i, j] * normalized_strength[j]
+            
+    return normalized_resistance
+
+@jit_safe()
+def heat_kernel_distance(adjacency_matrix, coordinates=None, t=0.5, eps=1e-10,normalize=False):
+    """
+    Computes the heat kernel distance matrix at diffusion time t.
+    
+    Parameters
+    ----------
+    adjacency_matrix : np.ndarray
+        A square adjacency matrix.
+    coordinates : np.ndarray, optional
+        Not used in computation, kept for signature consistency.
+    t : float, optional
+        Diffusion time parameter controlling the balance between local and 
+        global structure (default: 1.0).
+        - Small t values focus on local structure (similar to shortest path)
+        - Large t values focus on global structure (approaching resistance distance)
+    eps : float, optional
+        Small constant to ensure numerical stability (default: 1e-10).
+    
+    Returns
+    -------
+    dist : np.ndarray
+        The heat kernel distance matrix.
+    """
+    N = adjacency_matrix.shape[0]
+    A = adjacency_matrix.astype(np.float64)
+    
+    # Compute degree matrix and Laplacian
+    D = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        D[i, i] = np.sum(A[i])
+    
+    # Compute Laplacian: L = D - A
+    L = D - A
+    
+    # Compute eigenvalues and eigenvectors of Laplacian
+    eigvals, eigvecs = np.linalg.eigh(L)
+    
+    # Compute heat kernel matrix: H_t = exp(-t*L)
+    # Using eigendecomposition: H_t = U * exp(-t*Λ) * U^T
+    H_t = np.zeros((N, N), dtype=np.float64)
+    
+    # Compute exp(-t*λ) for each eigenvalue
+    exp_vals = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        if eigvals[i] > eps:  # Exclude zero eigenvalues (connected components)
+            exp_vals[i] = np.exp(-t * eigvals[i])
+        else:
+            exp_vals[i] = 1.0  # For numerical stability with zero eigenvalues
+    
+    # Compute H_t using the eigendecomposition
+    for i in range(N):
+        for j in range(N):
+            val = 0.0
+            for k in range(N):
+                val += exp_vals[k] * eigvecs[i, k] * eigvecs[j, k]
+            H_t[i, j] = val
+    
+    # Compute heat kernel distance: sqrt(H_t(i,i) + H_t(j,j) - 2*H_t(i,j))
+    dist_matrix = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                dist_matrix[i, j] = 0.0
+            else:
+                dist_ij = H_t[i, i] + H_t[j, j] - 2.0 * H_t[i, j]
+                # Ensure non-negative distance due to numerical errors
+                if dist_ij > 0:
+                    dist_matrix[i, j] = np.sqrt(dist_ij)
+                else:
+                    dist_matrix[i, j] = 0.0
+    if normalize:
+        strength = dist_matrix.sum(1)
+        normalized_strength: np.ndarray = np.power(strength, -0.5)
+        diagonalized_normalized_strength: np.ndarray = np.diag(normalized_strength)
+        normalized_dist_matrix: np.ndarray = (
+            diagonalized_normalized_strength
+            @ dist_matrix
+            @ diagonalized_normalized_strength
+        )
+        return normalized_dist_matrix
+    else:
+        return dist_matrix
+
+@jit_safe()
+def weighted_heat_kernel_distance(adjacency_matrix, coordinates, t=1.0, eps=1e-10):
+    """
+    Computes the heat kernel distance matrix at diffusion time t using 
+    weights based on Euclidean distances.
+    
+    Parameters
+    ----------
+    adjacency_matrix : np.ndarray
+        A square binary adjacency matrix.
+    coordinates : np.ndarray
+        Node coordinates (n_nodes, n_dimensions) used for edge weighting.
+    t : float, optional
+        Diffusion time parameter controlling the balance between local and 
+        global structure (default: 1.0).
+    eps : float, optional
+        Small constant to ensure numerical stability (default: 1e-10).
+    
+    Returns
+    -------
+    dist : np.ndarray
+        The heat kernel distance matrix.
+    """
+    N = adjacency_matrix.shape[0]
+    
+    # Create weighted adjacency matrix using inverse Euclidean distances
+    A = np.zeros((N, N), dtype=np.float64)
+    
+    for i in range(N):
+        for j in range(N):
+            if adjacency_matrix[i, j] > 0:
+                # Calculate Euclidean distance between nodes
+                dist = 0.0
+                for d in range(coordinates.shape[1]):
+                    dist += (coordinates[i, d] - coordinates[j, d])**2
+                dist = np.sqrt(dist) + 1e-12  # Avoid division by zero
+                
+                # Use inverse distance as weight (same as resistance distance)
+                A[i, j] = 1.0 / dist
+    
+    # Compute weighted degree matrix
+    D = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        row_sum = 0.0
+        for j in range(N):
+            row_sum += A[i, j]
+        D[i, i] = row_sum
+    
+    # Compute weighted Laplacian: L = D - A
+    L = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                L[i, j] = D[i, j]
+            else:
+                L[i, j] = -A[i, j]
+    
+    # Compute eigenvalues and eigenvectors of Laplacian
+    eigvals, eigvecs = np.linalg.eigh(L)
+    
+    # Compute heat kernel matrix: H_t = exp(-t*L)
+    # Using eigendecomposition: H_t = U * exp(-t*Λ) * U^T
+    H_t = np.zeros((N, N), dtype=np.float64)
+    
+    # Manual matrix multiplication for numba compatibility
+    for i in range(N):
+        for j in range(N):
+            val = 0.0
+            for k in range(N):
+                # Only use non-zero eigenvalues
+                if eigvals[k] > eps:
+                    val += np.exp(-t * eigvals[k]) * eigvecs[i, k] * eigvecs[j, k]
+                else:
+                    # Handle zero eigenvalue differently (connected components)
+                    val += eigvecs[i, k] * eigvecs[j, k]
+            H_t[i, j] = val
+    
+    # Compute heat kernel distance: sqrt(H_t(i,i) + H_t(j,j) - 2*H_t(i,j))
+    dist_matrix = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                dist_matrix[i, j] = 0.0
+            else:
+                dist_ij = H_t[i, i] + H_t[j, j] - 2.0 * H_t[i, j]
+                # Ensure non-negative distance due to numerical errors
+                if dist_ij > eps:
+                    dist_matrix[i, j] = np.sqrt(dist_ij)
+                else:
+                    dist_matrix[i, j] = 0.0
+    
+    return dist_matrix
+
+@jit_safe()
+def normalized_heat_kernel_distance(adjacency_matrix, coordinates, t=1.0, eps=1e-10):
+    """
+    Computes the heat kernel distance matrix at diffusion time t and then
+    normalizes the resulting distance matrix based on node strengths.
+    
+    Parameters
+    ----------
+    adjacency_matrix : np.ndarray
+        A square binary adjacency matrix.
+    coordinates : np.ndarray
+        Node coordinates (n_nodes, n_dimensions) used for edge weighting.
+    t : float, optional
+        Diffusion time parameter controlling the balance between local and 
+        global structure (default: 1.0).
+    eps : float, optional
+        Small constant to ensure numerical stability (default: 1e-10).
+    
+    Returns
+    -------
+    dist : np.ndarray
+        The normalized heat kernel distance matrix.
+    """
+    N = adjacency_matrix.shape[0]
+    
+    # Create weighted adjacency matrix using inverse Euclidean distances
+    W = np.zeros((N, N), dtype=np.float64)
+    
+    for i in range(N):
+        for j in range(N):
+            if adjacency_matrix[i, j] > 0:
+                # Calculate Euclidean distance between nodes
+                dist = 0.0
+                for d in range(coordinates.shape[1]):
+                    dist += (coordinates[i, d] - coordinates[j, d])**2
+                dist = np.sqrt(dist) + 1e-12  # Avoid division by zero
+                
+                # Use inverse distance as weight
+                W[i, j] = 1.0 / dist
+    
+    # Compute weighted degree matrix
+    D = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        row_sum = 0.0
+        for j in range(N):
+            row_sum += W[i, j]
+        D[i, i] = row_sum
+    
+    # Compute weighted Laplacian: L = D - W
+    L = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                L[i, j] = D[i, j]
+            else:
+                L[i, j] = -W[i, j]
+    
+    # Compute eigenvalues and eigenvectors of Laplacian
+    eigvals, eigvecs = np.linalg.eigh(L)
+    
+    # Compute heat kernel matrix: H_t = exp(-t*L)
+    # Using eigendecomposition: H_t = U * exp(-t*Λ) * U^T
+    H_t = np.zeros((N, N), dtype=np.float64)
+    
+    # Manual matrix multiplication for numba compatibility
+    for i in range(N):
+        for j in range(N):
+            val = 0.0
+            for k in range(N):
+                # Only use non-zero eigenvalues
+                if eigvals[k] > eps:
+                    val += np.exp(-t * eigvals[k]) * eigvecs[i, k] * eigvecs[j, k]
+                else:
+                    # Handle zero eigenvalue differently (connected components)
+                    val += eigvecs[i, k] * eigvecs[j, k]
+            H_t[i, j] = val
+    
+    # Compute heat kernel distance: sqrt(H_t(i,i) + H_t(j,j) - 2*H_t(i,j))
+    dist_matrix = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                dist_matrix[i, j] = 0.0
+            else:
+                dist_ij = H_t[i, i] + H_t[j, j] - 2.0 * H_t[i, j]
+                # Ensure non-negative distance due to numerical errors
+                if dist_ij > eps:
+                    dist_matrix[i, j] = np.sqrt(dist_ij)
+                else:
+                    dist_matrix[i, j] = 0.0
+    
+    # Calculate node strengths for normalization (using the weighted adjacency)
+    strength = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            strength[i] += W[i, j]
+    
+    # Compute normalized strength (power -0.5)
+    normalized_strength = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        if strength[i] > 1e-12:  # Avoid division by zero
+            normalized_strength[i] = 1.0 / np.sqrt(strength[i])
+        else:
+            normalized_strength[i] = 0.0
+    
+    # Apply normalization to distance matrix
+    normalized_distance = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            normalized_distance[i, j] = normalized_strength[i] * dist_matrix[i, j] * normalized_strength[j]
+            
+    return normalized_distance
+
+@jit_safe()
 def shortest_path_distance(adjacency_matrix,coordinates = None):
     """
     Computes shortest-path distances between all pairs of nodes
@@ -370,6 +963,181 @@ def shortest_path_distance(adjacency_matrix,coordinates = None):
                 )
 
     return dist_matrix
+
+@jit_safe()
+def weighted_shortest_path_distance(adjacency_matrix, coordinates):
+    """
+    Computes shortest-path distances between all pairs of nodes using the
+    Floyd-Warshall algorithm with weights based on Euclidean distances.
+
+    Parameters
+    ----------
+    adjacency_matrix : np.ndarray
+        A square binary adjacency matrix where 1 indicates a connection.
+    coordinates : np.ndarray
+        Node coordinates (n_nodes, n_dimensions) used for edge weighting.
+
+    Returns
+    -------
+    dist_matrix : np.ndarray
+        A square matrix where entry (i, j) represents the weighted shortest
+        path distance from node i to j.
+    """
+    N = adjacency_matrix.shape[0]
+    
+    # Initialize distance matrix with infinity for non-connected nodes
+    dist_matrix = np.full((N, N), np.inf, dtype=np.float64)
+    
+    # Set diagonal to 0
+    for i in range(N):
+        dist_matrix[i, i] = 0.0
+    
+    # Calculate Euclidean distance weights for connected edges
+    for i in range(N):
+        for j in range(N):
+            if adjacency_matrix[i, j] > 0:
+                # Calculate Euclidean distance between nodes
+                dist = 0.0
+                for d in range(coordinates.shape[1]):
+                    dist += (coordinates[i, d] - coordinates[j, d])**2
+                dist = np.sqrt(dist)
+                dist_matrix[i, j] = dist
+    
+    # Floyd-Warshall algorithm
+    for k in range(N):  # Intermediate node
+        for i in range(N):  # Source node
+            for j in range(N):  # Destination node
+                # Relax the distance via intermediate node k
+                if dist_matrix[i, k] != np.inf and dist_matrix[k, j] != np.inf:
+                    new_dist = dist_matrix[i, k] + dist_matrix[k, j]
+                    if new_dist < dist_matrix[i, j]:
+                        dist_matrix[i, j] = new_dist
+    
+    return dist_matrix
+
+@jit_safe()
+def controllability_distance(adjacency_matrix, coordinates, energy_parameter=1.0, eps=1e-10):
+    """
+    Computes a distance matrix based on network controllability principles.
+    This measure quantifies the minimum energy required to drive the system
+    from one node to another.
+    
+    Parameters
+    ----------
+    adjacency_matrix : np.ndarray
+        A square binary adjacency matrix.
+    coordinates : np.ndarray
+        Node coordinates (n_nodes, n_dimensions) used for edge weighting.
+    energy_parameter : float, optional
+        Parameter controlling the energy scaling (default: 1.0).
+        Higher values increase the cost of control over long distances.
+    eps : float, optional
+        Small constant to ensure numerical stability (default: 1e-10).
+    
+    Returns
+    -------
+    dist : np.ndarray
+        The controllability-based distance matrix.
+    """
+    N = adjacency_matrix.shape[0]
+    
+    # Create weighted adjacency matrix using inverse Euclidean distances
+    W = np.zeros((N, N), dtype=np.float64)
+    
+    for i in range(N):
+        for j in range(N):
+            if adjacency_matrix[i, j] > 0:
+                # Calculate Euclidean distance
+                dist = 0.0
+                for d in range(coordinates.shape[1]):
+                    dist += (coordinates[i, d] - coordinates[j, d])**2
+                dist = np.sqrt(dist) + 1e-12  # Avoid division by zero
+                
+                # Use inverse distance as weight
+                W[i, j] = 1.0 / dist
+    
+    # Compute controllability Gramian approximation
+    # In linear systems, the controllability Gramian can be approximated using:
+    # W_c = ∑_{k=0}^{∞} A^k*B*B^T*(A^T)^k
+    # We'll use a simplified approach focusing on network structure
+    
+    # First, normalize the adjacency matrix by spectral radius
+    row_sums = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            row_sums[i] += W[i, j]
+    
+    max_sum = 0.0
+    for i in range(N):
+        if row_sums[i] > max_sum:
+            max_sum = row_sums[i]
+    
+    if max_sum > eps:
+        for i in range(N):
+            for j in range(N):
+                W[i, j] /= max_sum
+    
+    # Compute a simplified controllability measure
+    # We'll use the resolvent matrix (I - αW)^(-1) as an approximation
+    alpha = 0.95  # Set close to 1 to capture long-range effects
+    
+    # Compute resolvent matrix
+    I_minus_alphaW = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                I_minus_alphaW[i, j] = 1.0 - alpha * W[i, j]
+            else:
+                I_minus_alphaW[i, j] = -alpha * W[i, j]
+                
+    # Compute inverse
+    resolvent = np.linalg.inv(I_minus_alphaW)
+    
+    # Compute controllability matrix
+    # We use the energy interpretation: nodes requiring less energy to control
+    # are closer in the controllability sense
+    control_energy = np.zeros((N, N), dtype=np.float64)
+    
+    for i in range(N):
+        for j in range(N):
+            if i == j:
+                control_energy[i, j] = 0.0
+            else:
+                # Energy is related to the inverse of the square of connection strength
+                energy = 0.0
+                for k in range(N):
+                    energy += (resolvent[i, k] - resolvent[j, k])**2
+                
+                # Apply energy parameter to scale the distance
+                control_energy[i, j] = energy_parameter * np.sqrt(energy)
+    
+    # Ensure the distance matrix is symmetric (average if needed)
+    dist_matrix = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            dist_matrix[i, j] = (control_energy[i, j] + control_energy[j, i]) / 2.0
+    
+    # Calculate node strengths for normalization (using the weighted adjacency)
+    strength = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            strength[i] += W[i, j]
+    
+    # Compute normalized strength (power -0.5)
+    normalized_strength = np.zeros(N, dtype=np.float64)
+    for i in range(N):
+        if strength[i] > 1e-12:  # Avoid division by zero
+            normalized_strength[i] = 1.0 / np.sqrt(strength[i])
+        else:
+            normalized_strength[i] = 0.0
+    
+    # Apply normalization to distance matrix
+    normalized_distance = np.zeros((N, N), dtype=np.float64)
+    for i in range(N):
+        for j in range(N):
+            normalized_distance[i, j] = normalized_strength[i] * dist_matrix[i, j] * normalized_strength[j]
+            
+    return normalized_distance
 
 @jit_safe()
 def search_information(W, coordinates = None,symmetric=True):
